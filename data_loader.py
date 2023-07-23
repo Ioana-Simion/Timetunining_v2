@@ -71,11 +71,14 @@ class PascalVOCDataModule():
     def get_module_name(self):
         return "PascalVOCDataModule"
     
+    def get_num_classes(self):
+        return 21
+    
 
 
 def test_pascal_data_module(logger):
 
-    image_train_transform = trn.Compose([trn.Resize(224, 224), trn.ToTensor(), trn.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.255])])
+    image_train_transform = trn.Compose([trn.Resize((224, 224)), trn.ToTensor(), trn.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.255])])
     target_train_transform = trn.Compose([trn.Resize((224, 224), interpolation=trn.InterpolationMode.NEAREST), trn.ToTensor()])
     train_transforms = {"img": image_train_transform, "target": target_train_transform}
     dataset = PascalVOCDataModule(batch_size=4, train_transform=train_transforms, val_transform=train_transforms, test_transform=train_transforms)
