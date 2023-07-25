@@ -30,7 +30,7 @@ class PascalVOCDataModule():
 
     """
 
-    def __init__(self, batch_size, train_transform, val_transform, test_transform,  dir="/home/ssalehi/dataset/PascalVOC_v2", year="2012", split="train", num_workers=2) -> None:
+    def __init__(self, batch_size, train_transform, val_transform, test_transform,  dir="/home/ssalehi/dataset/PascalVOC_v2", year="2012", split="train", num_workers=8) -> None:
         super().__init__()
         self.num_workers = num_workers
         self.batch_size = batch_size
@@ -51,13 +51,13 @@ class PascalVOCDataModule():
         self.test_dataset = VOCSegmentation(self.dir, year='2012', image_set='val', download=download, transform=self.image_test_transform, target_transform=self.target_test_transform)
 
     def get_train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
     
     def get_val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
     
     def get_test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
     
     def get_train_dataset_size(self):
         return len(self.train_dataset)
