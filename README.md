@@ -14,6 +14,20 @@ According to what we have discussed so far :
 
 ![Logo](Sessions/20_07_2023.jpg)
 
+# 26_07_2023
+
+According to what we have discussed so far : 
+
+1 - Testing slot attention instead of prototypes
+
+2 - Initializing the instace segmentor by training on the synthetic datasets
+
+3 - Testing DINO + Positional + SA + GT to if it can learn instances
+
+4 - Sliding object experiment
+
+![Logo](Sessions/26_07_2023.jpg)
+
 # Questions
 
 1 - It is not obvious if the background is being excluded from the computation or not. I should check it out. 
