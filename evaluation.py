@@ -8,8 +8,9 @@ import math
 import scann
 import time
 from eval_metrics import PredsmIoU
-import os
 import numpy as np
+from transformations import Compose, RandomResizedCrop, RandomHorizontalFlip
+from torchvision import transforms
 
 class HummingbirdEvaluation():
     def __init__(self, feature_extractor, dataset_module, num_neighbour, augmentation_epoch, memory_size, device):
@@ -25,6 +26,7 @@ class HummingbirdEvaluation():
         self.feature_memory, self.label_memory = self.create_memory()
         self.feature_memory = self.feature_memory.to(self.device)
         self.label_memory = self.label_memory.to(self.device)
+        print(self.label_memory[:1000])
         self.save_memory()
         self.NN_algorithm = scann.scann_ops_pybind.builder(self.feature_memory.detach().cpu().numpy(), num_neighbour, "dot_product").tree(
     num_leaves=512, num_leaves_to_search=32, training_sample_size=self.feature_memory.size(0)).score_ah(
@@ -32,11 +34,10 @@ class HummingbirdEvaluation():
 
     def create_memory(self):
 
-        if os.path.isfile("temp/feature_memory.pt") and os.path.isfile("temp/label_memory.pt"):
-            feature_memory = torch.load("temp/feature_memory.pt")
-            label_memory = torch.load("temp/label_memory.pt")
-            return feature_memory, label_memory
-        
+        # if os.path.isfile("temp/feature_memory.pt") and os.path.isfile("temp/label_memory.pt"):
+        #     feature_memory = torch.load("temp/feature_memory.pt")
+        #     label_memory = torch.load("temp/label_memory.pt")
+        #     return feature_memory, label_memory
         memory = []
         label_memory = []
         train_loader = self.dataset_module.get_train_dataloader()
@@ -59,6 +60,8 @@ class HummingbirdEvaluation():
                     normalized_sampled_features = sampled_features / torch.norm(sampled_features, dim=1, keepdim=True)
                     # self.overlay_sampled_locations_on_gt(y, sampled_indices)
                     label = F.interpolate(y.float(), size=(eval_spatial_resolution, eval_spatial_resolution), mode="nearest").long()
+                    ## make the elementes that are 255 to 0
+                    label[label == 255] = 0
                     label = label.flatten(1)
                     ## select the labels of the sampled features
                     sampled_indices = sampled_indices.to(self.device)
@@ -68,6 +71,8 @@ class HummingbirdEvaluation():
                     print(f"batch {i} has been processed at {time.ctime()}")
         memory = torch.cat(memory)
         label_memory = torch.cat (label_memory)
+        if label_memory.max() > 20:
+            print("your are fucked up.")
         memory = memory.flatten(0, 1)
         label_memory = label_memory.flatten(0, 1)
         return memory, label_memory
@@ -175,8 +180,8 @@ class HummingbirdEvaluation():
             v (torch.Tensor): value tensor of shape (bs, num_patches, num_sampled_features, label_dim)
         """
         d_k = q.size(-1)
-        q = q / torch.norm(q, dim=-1, keepdim=True)
-        k = k / torch.norm(k, dim=-1, keepdim=True)
+        q = F.normalize(q, dim=-1)
+        k = F.normalize(k, dim=-1)
         q = q.unsqueeze(2) ## (bs, num_patches, 1, d_k)
         attn = torch.einsum("bnld,bnmd->bnlm", q, k) / beta ## (bs, num_patches, num_sampled_features)
         attn = attn.squeeze(2)
@@ -188,7 +193,7 @@ class HummingbirdEvaluation():
     
     def find_nearest_key_to_query(self, q):
         bs, num_patches, d_k = q.shape
-        reshaped_q = q.reshape(bs*num_patches, d_k).detach().cpu().numpy()
+        reshaped_q = q.reshape(bs*num_patches, d_k)
         neighbors, distances = self.NN_algorithm.search_batched(reshaped_q)
         neighbors = neighbors.astype(np.int64)
         neighbors = torch.from_numpy(neighbors).to(self.device)
@@ -197,7 +202,7 @@ class HummingbirdEvaluation():
         key_features = key_features.reshape(bs, num_patches, self.num_neighbour, -1)
         key_labels = self.label_memory[neighbors]
         key_labels = key_labels.reshape(bs, num_patches, self.num_neighbour)
-        ## convert key_labels to one hot
+        ## convert key_labels
         key_labels = F.one_hot(key_labels, num_classes=self.dataset_module.get_num_classes()).float()
         return key_features, key_labels
 
@@ -213,7 +218,10 @@ class HummingbirdEvaluation():
                 y = y.to(self.device)
                 y = (y * 255).long()
                 features, _ = self.feature_extractor.get_intermediate_layer_feats(x)
-                key_features, key_labels = self.find_nearest_key_to_query(features)
+                ## copy the data of features to another variable
+                q = features.clone()
+                q = q.detach().cpu().numpy()
+                key_features, key_labels = self.find_nearest_key_to_query(q)
                 label_hat =  self.cross_attention(features, key_features, key_labels)
                 cluster_map = label_hat.argmax(dim=-1)
                 cluster_map = cluster_map.reshape(x.shape[0], eval_spatial_resolution, eval_spatial_resolution).unsqueeze(1)
@@ -237,11 +245,38 @@ class HummingbirdEvaluation():
 
 if __name__ == "__main__":
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
-    feature_extractor = FeatureExtractor(vit_model)
-    image_train_transform = trn.Compose([trn.Resize((224, 224)), trn.ToTensor(), trn.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.255])])
+    feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=28)
+    # Define transformation parameters
+    min_scale_factor = 0.5
+    max_scale_factor = 2.0
+    brightness_jitter_range = 0.1
+    contrast_jitter_range = 0.1
+    saturation_jitter_range = 0.1
+    hue_jitter_range = 0.1
+
+    brightness_jitter_probability = 0.5
+    contrast_jitter_probability = 0.5
+    saturation_jitter_probability = 0.5
+    hue_jitter_probability = 0.5
+
+    # Create the transformation
+    image_train_transform = trn.Compose([
+        trn.RandomApply([trn.ColorJitter(brightness=brightness_jitter_range)], p=brightness_jitter_probability),
+        trn.RandomApply([trn.ColorJitter(contrast=contrast_jitter_range)], p=contrast_jitter_probability),
+        trn.RandomApply([trn.ColorJitter(saturation=saturation_jitter_range)], p=saturation_jitter_probability),
+        trn.RandomApply([trn.ColorJitter(hue=hue_jitter_range)], p=hue_jitter_probability),
+        trn.ToTensor(),
+        trn.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.255])
+    ])
+
+    shared_transform = Compose([
+        RandomResizedCrop(size=(448, 448), scale=(min_scale_factor, max_scale_factor)),
+        RandomHorizontalFlip(probability=0.1),
+    ])
+        
     target_train_transform = trn.Compose([trn.Resize((224, 224), interpolation=trn.InterpolationMode.NEAREST), trn.ToTensor()])
-    train_transforms = {"img": image_train_transform, "target": target_train_transform}
+    train_transforms = {"img": image_train_transform, "target": None, "shared": shared_transform}
     dataset = PascalVOCDataModule(batch_size=128, train_transform=train_transforms, val_transform=train_transforms, test_transform=train_transforms)
     dataset.setup()
-    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=10, augmentation_epoch=1, memory_size=200000, device="cuda:2")
+    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=10, augmentation_epoch=2, memory_size=10240000, device="cuda:2")
     evaluator.incontext_evaluation()
