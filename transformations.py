@@ -6,13 +6,21 @@ from torchvision import transforms
 import torch
 
 
-def random_resize_crop(image, target, size=(256, 256)):
+def random_resize_crop(image, target, size=(256, 256), scale=(0.08, 1.0), ratio=(3.0 / 4.0, 4.0 / 3.0)):
     ## convert target to tensor
     if not isinstance(target, torch.Tensor):
         target = transforms.ToTensor()(target)
-    i, j, h, w = transforms.RandomResizedCrop.get_params(image, scale=(0.08, 1.0), ratio=(3.0 / 4.0, 4.0 / 3.0))
+    i, j, h, w = transforms.RandomResizedCrop.get_params(image, scale=scale, ratio=ratio)
     image = F.resized_crop(image, i, j, h, w, size, interpolation=Image.BILINEAR)
     target = F.resized_crop(target, i, j, h, w, size, interpolation=Image.NEAREST)
+    return image, target
+
+def resize(image, target, size=(256, 256)):
+    ## convert target to tensor
+    if not isinstance(target, torch.Tensor):
+        target = transforms.ToTensor()(target)
+    image = F.resize(image, size, interpolation=Image.BILINEAR)
+    target = F.resize(target, size, interpolation=Image.NEAREST)
     return image, target
 
 
@@ -42,7 +50,7 @@ class RandomResizedCrop(object):
 
     def __call__(self, img, target):
         if random.random() < self.probability:
-            return random_resize_crop(img, target, self.size)
+            return random_resize_crop(img, target, self.size, self.scale, self.ratio)
         return img, target
 
 class RandomHorizontalFlip(object):
@@ -63,3 +71,11 @@ class Compose(object):
         for t in self.transforms:
             img, target = t(img, target)
         return img, target
+
+
+class Resize(object):
+    def __init__(self, size):
+        self.size = size
+    
+    def __call__(self, img, target):
+        return resize(img, target, self.size)

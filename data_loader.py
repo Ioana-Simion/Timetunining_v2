@@ -117,15 +117,20 @@ class PascalVOCDataModule():
         self.train_dataset = VOCDataset(self.dir, image_set="trainaug", transform=self.image_train_transform, target_transform=self.target_train_transform, transforms=self.shared_train_transform, return_masks=True)
         self.val_dataset = VOCDataset(self.dir, image_set="val", transform=self.image_val_transform, target_transform=self.target_val_transform, transforms=self.shared_val_transform, return_masks=True)
         self.test_dataset = VOCDataset(self.dir, image_set="val", transform=self.image_test_transform, target_transform=self.target_test_transform, transforms=self.shared_test_transform, return_masks=True)
+        print(f"Train size : {len(self.train_dataset)}")
+        print(f"Val size : {len(self.val_dataset)}")
 
-    def get_train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
+    def get_train_dataloader(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        return DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
     
-    def get_val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+    def get_val_dataloader(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        return DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
     
-    def get_test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+    def get_test_dataloader(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        return DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
     
     def get_train_dataset_size(self):
         return len(self.train_dataset)
@@ -169,7 +174,7 @@ def test_pascal_data_module(logger):
 
     shared_transform = Compose([
         RandomResizedCrop(size=(448, 448), scale=(min_scale_factor, max_scale_factor)),
-        RandomHorizontalFlip(probability=0.1),
+        # RandomHorizontalFlip(probability=0.1),
     ])
         
     
