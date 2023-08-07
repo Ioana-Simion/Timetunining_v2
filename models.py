@@ -148,10 +148,11 @@ class FCNHead(BaseDecodeHead):
     
 
 class FeatureExtractor(torch.nn.Module):
-    def __init__(self, vit_model, eval_spatial_resolution=14):
+    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768):
         super().__init__()
         self.model = vit_model
         self.eval_spatial_resolution = eval_spatial_resolution
+        self.d_model = d_model
 
     def get_intermediate_layer_feats(self, imgs, feat="k", layer_num=-1):
         bs, c, h, w = imgs.shape

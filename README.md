@@ -28,6 +28,19 @@ According to what we have discussed so far :
 
 ![Logo](Sessions/26_07_2023.jpg)
 
+# 07_-8_2023
+
+According to what we have discussed so far, we can start working on further improving the performance of TimeT by the following revisements:
+1 - Involving coarse grained/fine grained branch to predicit the location of a tube sampled of each clip at each frame.
+2 - Using CoTracker to track the location of each point in the video and clustering the object flows to detects displacements. 
+3 - Training TimeT from scratch
+
+Experiments to do : 
+1 - Are the patches aware of their origins in DINO? 
+2 - How can we use cotracker instead of flow and train from scratch in TimeT?
+
+![Logo](Sessions/07_08_2023.jpg)
+
 # Questions
 
 1 - It is not obvious if the background is being excluded from the computation or not. I should check it out. 

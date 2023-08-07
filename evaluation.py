@@ -24,11 +24,15 @@ class HummingbirdEvaluation():
         self.feature_extractor.eval()
         self.feature_extractor = feature_extractor.to(self.device)
         self.num_sampled_features = self.memory_size // (self.dataset_module.get_train_dataset_size() * self.augmentation_epoch)
-        self.feature_memory, self.label_memory = self.create_memory()
+        ## create a predefined empty feature memory and label memory
+        self.feature_memory = torch.zeros((self.memory_size, self.feature_extractor.d_model))
+        self.label_memory = torch.zeros((self.memory_size, self.dataset_module.get_num_classes()))
+        self.create_memory()
         self.feature_memory = self.feature_memory.to(self.device)
         self.label_memory = self.label_memory.to(self.device)
         print(self.label_memory[:5000])
-        self.save_memory()
+        # self.save_memory()
+        print("memory has been saved")
         self.NN_algorithm = scann.scann_ops_pybind.builder(self.feature_memory.detach().cpu().numpy(), num_neighbour, "dot_product").tree(
     num_leaves=512, num_leaves_to_search=32, training_sample_size=self.feature_memory.size(0)).score_ah(
     2, anisotropic_quantization_threshold=0.2).reorder(120).build()
@@ -38,11 +42,10 @@ class HummingbirdEvaluation():
         # if os.path.isfile("/ssdstore/ssalehi/temp/feature_memory.pt") and os.path.isfile("/ssdstore/ssalehi/temp/label_memory.pt"):
         #     feature_memory = torch.load("/ssdstore/ssalehi/temp/feature_memory.pt")
         #     label_memory = torch.load("/ssdstore/ssalehi/temp/label_memory.pt")
-        #     return feature_memory, label_memory
-        memory = []
-        label_memory = []
+        #     return feature_memory, label_memory   
         train_loader = self.dataset_module.get_train_dataloader()
         eval_spatial_resolution = self.feature_extractor.eval_spatial_resolution
+        idx = 0
         with torch.no_grad():
             for j in range(self.augmentation_epoch):
                 print(f"augmentation epoch {j} has started at {time.ctime()}")
@@ -71,14 +74,18 @@ class HummingbirdEvaluation():
                     label_hat = label.gather(1, sampled_indices.unsqueeze(-1).repeat(1, 1, label.shape[-1]))
 
                     # label_hat = label.gather(1, sampled_indices)
-                    label_memory.append(label_hat)
-                    memory.append(normalized_sampled_features)
+                    normalized_sampled_features = normalized_sampled_features.flatten(0, 1)
+                    label_hat = label_hat.flatten(0, 1)
+                    self.feature_memory[idx:idx+normalized_sampled_features.size(0)] = normalized_sampled_features.detach().cpu()
+                    self.label_memory[idx:idx+label_hat.size(0)] = label_hat.detach().cpu()
+                    idx += normalized_sampled_features.size(0)
+                    # memory.append(normalized_sampled_features.detach().cpu())
                     print(f"batch {i} has been processed at {time.ctime()}")
-            memory = torch.cat(memory)
-            label_memory = torch.cat (label_memory)
-            memory = memory.flatten(0, 1)
-            label_memory = label_memory.flatten(0, 1)
-            return memory, label_memory
+            # memory = torch.cat(memory)
+            # label_memory = torch.cat (label_memory)
+            # memory = memory.flatten(0, 1)
+            # label_memory = label_memory.flatten(0, 1)
+            # return memory, label_memory
 
     def save_memory(self):
         torch.save(self.feature_memory, "/ssdstore/ssalehi/temp/feature_memory.pt")
@@ -208,13 +215,15 @@ class HummingbirdEvaluation():
         return key_features, key_labels
 
     def incontext_evaluation(self):
+        print("incontext evaluation has started")
         metric = PredsmIoU(21, 21)
-        val_loader = self.dataset_module.get_val_dataloader(batch_size=32)
+        val_loader = self.dataset_module.get_val_dataloader(batch_size=16)
         eval_spatial_resolution = self.feature_extractor.eval_spatial_resolution
         lebel_hats = []
         lables = []
         with torch.no_grad():
             for i, (x, y) in enumerate(val_loader):
+                print(f"batch {i} has been read at {time.ctime()}")
                 x = x.to(self.device)
                 y = y.to(self.device)
                 y = (y * 255).long()
@@ -229,8 +238,8 @@ class HummingbirdEvaluation():
                 label_hat = label_hat.reshape(bs, eval_spatial_resolution, eval_spatial_resolution, label_dim).permute(0, 3, 1, 2)
                 resized_label_hats =  F.interpolate(label_hat.float(), size=(h, w), mode="bilinear")
                 cluster_map = resized_label_hats.argmax(dim=1).unsqueeze(1)
-                lebel_hats.append(cluster_map)
-                lables.append(y)
+                lebel_hats.append(cluster_map.detach().cpu())
+                lables.append(y.detach().cpu())
         
             lables = torch.cat(lables)
             label_hats = torch.cat(lebel_hats)
@@ -285,5 +294,5 @@ if __name__ == "__main__":
     val_transforms = {"img": image_val_transform, "target": None , "shared": shared_val_transform}
     dataset = PascalVOCDataModule(batch_size=128, train_transform=train_transforms, val_transform=val_transforms, test_transform=val_transforms)
     dataset.setup()
-    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=30, augmentation_epoch=1, memory_size=10240000, device="cuda:0")
+    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=30, augmentation_epoch=1, memory_size=10240000, device="cuda:7")
     evaluator.incontext_evaluation()
