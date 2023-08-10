@@ -190,8 +190,14 @@ class FeatureExtractor(torch.nn.Module):
         elif feat == "v":
             feats = v[:, 1:, :]
         return feats, normalized_cls_attention
+    
+    def forward_features(self, imgs):
+        features = self.model.get_intermediate_layers(imgs)[0]
+        features = features[:, 1:]
+        normalized_cls_attention = self.model.get_last_selfattention(imgs)
+        return features, normalized_cls_attention
 
-
+    
 
 if __name__ == "__main__":
 

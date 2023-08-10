@@ -31,7 +31,7 @@ class HummingbirdEvaluation():
         self.feature_memory = self.feature_memory.to(self.device)
         self.label_memory = self.label_memory.to(self.device)
         print(self.label_memory[:5000])
-        # self.save_memory()
+        self.save_memory()
         print("memory has been saved")
         self.NN_algorithm = scann.scann_ops_pybind.builder(self.feature_memory.detach().cpu().numpy(), num_neighbour, "dot_product").tree(
     num_leaves=512, num_leaves_to_search=32, training_sample_size=self.feature_memory.size(0)).score_ah(
@@ -56,7 +56,7 @@ class HummingbirdEvaluation():
                     y = (y * 255).long()
                     y[y == 255] = 0
                     print(f"batch {i} has been moved to {self.device} at {time.ctime()}")
-                    features, _ = self.feature_extractor.get_intermediate_layer_feats(x)
+                    features, _ = self.feature_extractor.forward_features(x)
                     print(f"batch {i} sampling process has been started at {time.ctime()}")
                     input_size = x.shape[-1]
                     patch_size = input_size // eval_spatial_resolution
@@ -228,7 +228,7 @@ class HummingbirdEvaluation():
                 y = y.to(self.device)
                 y = (y * 255).long()
                 _, _, h, w = x.shape
-                features, _ = self.feature_extractor.get_intermediate_layer_feats(x)
+                features, _ = self.feature_extractor.forward_features(x)
                 ## copy the data of features to another variable
                 q = features.clone()
                 q = q.detach().cpu().numpy()
@@ -256,6 +256,7 @@ class HummingbirdEvaluation():
 
 
 if __name__ == "__main__":
+
     input_size = 512
     eval_spatial_resolution = input_size // 16
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vitb16')
@@ -275,13 +276,16 @@ if __name__ == "__main__":
 
     # Create the transformation
     image_train_transform = trn.Compose([
-        trn.RandomApply([transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1)], p=0.5),
+        trn.RandomApply([trn.ColorJitter(brightness=brightness_jitter_range)], p=brightness_jitter_probability),
+        trn.RandomApply([transforms.ColorJitter(contrast=contrast_jitter_range)], p=contrast_jitter_probability),
+        trn.RandomApply([transforms.ColorJitter(saturation=saturation_jitter_range)], p=saturation_jitter_probability),
+        trn.RandomApply([transforms.ColorJitter(hue=hue_jitter_probability)], p=hue_jitter_probability),
         trn.ToTensor(),
         trn.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.255])
     ])
 
     shared_train_transform = Compose([
-        RandomResizedCrop(size=(input_size, input_size), scale=(min_scale_factor, max_scale_factor), ratio=(1, 1)),
+        RandomResizedCrop(size=(input_size, input_size), scale=(min_scale_factor, max_scale_factor)),
         # RandomHorizontalFlip(probability=0.1),
     ])
 
@@ -294,5 +298,5 @@ if __name__ == "__main__":
     val_transforms = {"img": image_val_transform, "target": None , "shared": shared_val_transform}
     dataset = PascalVOCDataModule(batch_size=128, train_transform=train_transforms, val_transform=val_transforms, test_transform=val_transforms)
     dataset.setup()
-    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=30, augmentation_epoch=1, memory_size=10240000, device="cuda:7")
+    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=30, augmentation_epoch=2, memory_size=10240000, device="cuda:7")
     evaluator.incontext_evaluation()
