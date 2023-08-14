@@ -12,6 +12,8 @@ from eval_metrics import PredsmIoU
 import numpy as np
 from transformations import Compose, RandomResizedCrop, RandomHorizontalFlip, Resize
 from torchvision import transforms
+from timm.models.vision_transformer import vit_small_patch16_224, vit_base_patch8_224
+import timm
 
 class HummingbirdEvaluation():
     def __init__(self, feature_extractor, dataset_module, num_neighbour, augmentation_epoch, memory_size, device):
@@ -260,7 +262,27 @@ if __name__ == "__main__":
     input_size = 512
     eval_spatial_resolution = input_size // 16
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vitb16')
-    feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=eval_spatial_resolution)
+    # supervised_vit = timm.create_model("vit_small_patch16_224", pretrained=True)
+    ## load the weights of supervised vit to dino
+    # supervised_vit_state_dict = supervised_vit.state_dict()
+    # vit_model_state_dict = vit_model.state_dict()
+    # for k, v in supervised_vit_state_dict.items():
+        # if k in vit_model_state_dict:
+            # vit_model_state_dict[k] = v
+    # msg = vit_model.load_state_dict(vit_model_state_dict)
+    path_to_checkpoint = "models/TimeT-b16.pth"
+    # vit_model = vit_small_patch16_224()  # or vit_base_patch8_224() if you want to use our larger model
+    state_dict = torch.load(path_to_checkpoint)
+    # new_state_dict = {}
+    # for k, v in state_dict["student"].items():
+    #     if k.split(".")[1] == "backbone":
+    #         new_state_dict[".".join(k.split(".")[2:])] = v
+    #         # {".".join(k.split(".")[2:]): v}
+    
+    # msg = vit_model.load_state_dict(new_state_dict, strict=False)
+    msg = vit_model.load_state_dict({".".join(k.split(".")[2:]): v for k, v in state_dict.items()}, strict=False)
+    print(msg)
+    feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=eval_spatial_resolution, d_model=768)
     # Define transformation parameters
     min_scale_factor = 0.5
     max_scale_factor = 2.0
@@ -298,5 +320,5 @@ if __name__ == "__main__":
     val_transforms = {"img": image_val_transform, "target": None , "shared": shared_val_transform}
     dataset = PascalVOCDataModule(batch_size=128, train_transform=train_transforms, val_transform=val_transforms, test_transform=val_transforms)
     dataset.setup()
-    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=30, augmentation_epoch=2, memory_size=10240000, device="cuda:7")
+    evaluator = HummingbirdEvaluation(feature_extractor, dataset, num_neighbour=30, augmentation_epoch=2, memory_size=10240000, device="cuda:2")
     evaluator.incontext_evaluation()

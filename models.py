@@ -1,9 +1,12 @@
+import queue
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 import timm
 from abc import ABCMeta, abstractmethod
+
+import tqdm
 # from mmcv.cnn import ConvModule
 
 
@@ -153,6 +156,15 @@ class FeatureExtractor(torch.nn.Module):
         self.model = vit_model
         self.eval_spatial_resolution = eval_spatial_resolution
         self.d_model = d_model
+    
+
+    def freeze_feature_extractor(self, unfreeze_layers=[]):
+        for name, param in self.model.named_parameters():
+            param.requires_grad = False
+            for unfreeze_layer in unfreeze_layers:
+                if unfreeze_layer in name:
+                    param.requires_grad = True
+                    break
 
     def get_intermediate_layer_feats(self, imgs, feat="k", layer_num=-1):
         bs, c, h, w = imgs.shape
@@ -197,7 +209,113 @@ class FeatureExtractor(torch.nn.Module):
         normalized_cls_attention = self.model.get_last_selfattention(imgs)
         return features, normalized_cls_attention
 
+
+
+class FeatureForwarder(torch.nn.Module):
+    def __init__(self, feature_extractor, context_frames, context_window, topk, feature_head=None):
+        super().__init__()
+        self.feature_extractor = feature_extractor
+        self.feature_head = feature_head
+        self.context_frames = context_frames
+        self.context_window = context_window
+        self.topk = topk  
+        self.mask_neighborhood = self.restrict_neighborhood(self.feature_extractor.eval_spatial_resolution, self.feature_extractor.eval_spatial_resolution, self.context_window)
+
     
+    def restrict_neighborhood(self, h, w, size_mask_neighborhood):
+        # We restrict the set of source nodes considered to a spatial neighborhood of the query node (i.e. ``local attention'')
+        mask = torch.zeros(h, w, h, w)
+        for i in range(h):
+            for j in range(w):
+                for p in range(2 * size_mask_neighborhood + 1):
+                    for q in range(2 * size_mask_neighborhood + 1):
+                        if i - size_mask_neighborhood + p < 0 or i - size_mask_neighborhood + p >= h:
+                            continue
+                        if j - size_mask_neighborhood + q < 0 or j - size_mask_neighborhood + q >= w:
+                            continue
+                        mask[i, j, i - size_mask_neighborhood + p, j - size_mask_neighborhood + q] = 1
+
+        mask = mask.reshape(h * w, h * w)
+        return mask
+    
+
+    def forward(self, feature_list, first_segmentation_map):
+        spatial_resolution = self.feature_extractor.eval_spatial_resolution
+        scores = first_segmentation_map.view(spatial_resolution, spatial_resolution, -1)
+        scores = scores.permute(2, 0, 1)  
+        first_seg = nn.functional.interpolate(first_seg.type(torch.DoubleTensor), size=(spatial_resolution, spatial_resolution), mode="nearest")
+        # first_seg = first_seg.squeeze(0)
+
+        # The queue stores the n preceeding frames
+        que = queue.Queue(self.context_frames)
+        
+        features = features.squeeze()
+        frame1_feat = features.T
+        
+        segmentation_list = []
+        for cnt in tqdm(range(1, feature_list.size(0))):
+            feature_tar = feature_list[cnt]
+
+            # we use the first segmentation and the n previous ones
+            used_frame_feats = [frame1_feat] + [pair[0] for pair in list(que.queue)]
+            used_segs = [first_seg] + [pair[1] for pair in list(que.queue)]
+
+            frame_tar_avg, feat_tar, mask_neighborhood = self.label_propagation(feature_tar, used_frame_feats, used_segs, mask_neighborhood)
+
+            # pop out oldest frame if neccessary
+            if que.qsize() == self.context_frames:
+                que.get()
+            # push current results into queue
+            # seg = copy.deepcopy(frame_tar_avg.detach())
+            seg = frame_tar_avg
+            que.put([feat_tar, seg])
+            # segmentation_list.append(norm_mask(frame_tar_avg.squeeze(0)))
+            segmentation_list.append(frame_tar_avg.squeeze(0))
+        return segmentation_list  
+
+
+
+    def label_propagation(self, feature_tar, list_frame_feats, list_segs):
+        """
+        propagate segs of frames in list_frames to frame_tar
+        """
+        ## we only need to extract feature of the target frame
+
+        h = w = self.feature_extractor.eval_spatial_resolution
+        features = feature_tar.squeeze()
+        return_feat_tar = features.T
+        feat_tar = feature_tar
+        ncontext = len(list_frame_feats)
+        feat_sources = torch.stack(list_frame_feats) # nmb_context x dim x h*w
+
+        feat_tar = F.normalize(feat_tar, dim=1, p=2)
+        feat_sources = F.normalize(feat_sources, dim=1, p=2)
+
+        feat_tar = feat_tar.unsqueeze(0).repeat(ncontext, 1, 1)
+        aff = torch.exp(torch.bmm(feat_tar, feat_sources) / 0.1) # nmb_context x h*w (tar: query) x h*w (source: keys)
+        aff = aff.to(features.device)
+        if self.context_frames > 0:
+            if mask_neighborhood is None:
+                mask_neighborhood = self.restrict_neighborhood(h, w, self.context_window)
+                mask_neighborhood = mask_neighborhood.unsqueeze(0).repeat(ncontext, 1, 1)
+                mask_neighborhood = mask_neighborhood.to(features.device)
+            aff =  aff * mask_neighborhood
+
+        aff = aff.transpose(2, 1).reshape(-1, h * w) # nmb_context*h*w (source: keys) x h*w (tar: queries)
+        tk_val, _ = torch.topk(aff, dim=0, k=self.topk)
+        tk_val_min, _ = torch.min(tk_val, dim=0)
+        aff[aff < tk_val_min] = 0
+
+        aff = aff / torch.sum(aff, keepdim=True, axis=0)
+        # aff = aff.softmax(dim=0)
+
+        list_segs = [s.to(features.device) for s in list_segs]
+        segs = torch.cat(list_segs)
+        nmb_context, C, h, w = segs.shape
+        segs = segs.reshape(nmb_context, C, -1).transpose(2, 1).reshape(-1, C).T # C x nmb_context*h*w
+        seg_tar = torch.mm(segs.double(), aff.double())
+        seg_tar = seg_tar.reshape(1, C, h, w)
+        return seg_tar, return_feat_tar, mask_neighborhood
 
 if __name__ == "__main__":
 

@@ -4,10 +4,10 @@ from torch.optim.lr_scheduler import ExponentialLR, LambdaLR
 from my_utils import cosine_scheduler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-class DINOMAEOptimizer:
-    def __init__(self, model_parameters, init_lr, peak_lr, decay_half_life, warmup_steps, grad_norm_clipping,
+class PatchCorrespondenceOptimizer:
+    def __init__(self, model_parameters_dict, init_lr, peak_lr, decay_half_life, warmup_steps, grad_norm_clipping,
                  init_weight_decay, peak_weight_decay, max_iter):
-        self.model_parameters = model_parameters
+        self.model_parameters_dict = model_parameters_dict
         self.init_lr = init_lr
         self.peak_lr = peak_lr
         self.decay_half_life = decay_half_life
@@ -23,9 +23,9 @@ class DINOMAEOptimizer:
     
     def setup_optimizer(self, optimizer_type='AdamW'):
         if optimizer_type == 'AdamW':
-            self.optimizer = AdamW(self.model_parameters, lr=self.init_lr, weight_decay=self.init_weight_decay)
+            self.optimizer = AdamW(self.model_parameters_dict, lr=self.init_lr, weight_decay=self.init_weight_decay)
         elif optimizer_type == 'SGD':
-            self.optimizer = SGD(self.model_parameters, lr=self.init_lr, weight_decay=self.init_weight_decay)
+            self.optimizer = SGD(self.model_parameters_dict, lr=self.init_lr, weight_decay=self.init_weight_decay)
         else:
             raise ValueError("Unsupported optimizer type. Choose 'Adam' or 'SGD'.")
     
@@ -39,7 +39,10 @@ class DINOMAEOptimizer:
         self.adjust_weight_decay()
         self.optimizer.step()
         if self.grad_norm_clipping:
-            torch.nn.utils.clip_grad_norm_(self.model_parameters, self.grad_norm_clipping)
+            parameters = []
+            for param_dict in self.model_parameters_dict:
+                parameters += param_dict['params']
+            torch.nn.utils.clip_grad_norm_(parameters, self.grad_norm_clipping)
         self.current_step += 1
         if self.current_step < self.warmup_steps:
             self.warmup_lr()

@@ -127,39 +127,3 @@ class LinearFinetune(torch.nn.Module):
         return miou
 
 
-
-
-def unsupervised_segmentation_validattion(self, epoch, val_spatial_resolution=56):
-    self.model.eval()
-    with torch.no_grad():
-        metric = PredsmIoU(21, 21)
-        # spatial_feature_dim = self.model.get_dino_feature_spatial_dim()
-        spatial_feature_dim = 50
-        clustering_method = PerDatasetClustering(spatial_feature_dim, 21)
-        feature_spatial_resolution = self.model.get_dino_feature_spatial_resolution()
-        mae_feature_group = []
-        targets = []
-        for i, (x, y) in enumerate(self.test_dataloader):
-            target = (y * 255).long()
-            img = x.to(self.device)
-            mae_spatial_features = self.model.forward_encoder(img)  # (B, np, dim)
-            resized_target =  F.interpolate(target.float(), size=(val_spatial_resolution, val_spatial_resolution), mode="nearest").long()
-            targets.append(resized_target)
-            mae_feature_group.append(mae_spatial_features)
-        eval_features = torch.cat(mae_feature_group, dim=0)
-        eval_targets = torch.cat(targets, dim=0)
-        B, np, dim = eval_features.shape
-        eval_features = eval_features.reshape(eval_features.shape[0], feature_spatial_resolution, feature_spatial_resolution, dim)
-        eval_features = eval_features.permute(0, 3, 1, 2)
-        eval_features = F.interpolate(eval_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear")
-        eval_features = eval_features.reshape(B, dim, -1).permute(0, 2, 1)
-        eval_features = eval_features.detach().cpu().unsqueeze(1)
-        cluster_maps = clustering_method.cluster(eval_features)
-        cluster_maps = cluster_maps.reshape(B, val_spatial_resolution, val_spatial_resolution).unsqueeze(1)
-        valid_idx = eval_targets != 255
-        valid_target = eval_targets[valid_idx]
-        valid_cluster_maps = cluster_maps[valid_idx]
-        metric.update(valid_target, valid_cluster_maps)
-        jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
-        self.logger.log({"val_k=gt_miou": jac})
-        print(f"eval finished, miou: {jac}")
