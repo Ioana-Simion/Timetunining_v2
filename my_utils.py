@@ -18,6 +18,10 @@ from torchvision.transforms import GaussianBlur
 from typing import List
 from torchvision.utils import draw_segmentation_masks
 import cv2
+from PIL import Image
+import matplotlib
+import numpy as np
+import wandb
 
 
 def show_trainable_paramters(model):
@@ -160,3 +164,50 @@ def overlay(image, mask, color = (255, 0, 0), alpha = 0.5, resize=None):
     image_combined = cv2.addWeighted(image, 1 - alpha, image_overlay, alpha, 0)
 
     return image_combined
+
+
+def make_seg_maps(data, cluster_map, logging_directory, name, w_featmap=28, h_featmap=28):
+    bs, fs, c, h, w = data.shape
+    # cluster_map = torch.Tensor(cluster_map.reshape(bs, fs, w_featmap, h_featmap))
+    # cluster_map = nn.functional.interpolate(cluster_map.type(torch.DoubleTensor), scale_factor=8, mode="nearest").detach().cpu()
+    cluster_map = cluster_map
+    for i, datum in enumerate(data):
+        frame_buffer = []
+        for j, frame in enumerate(datum):
+            frame_buffer.append(localize_objects(frame.permute(1, 2, 0).detach().cpu(), cluster_map[i, j]))
+        convert_list_to_video(frame_buffer, name + "_" + str(i), speed=1000/ datum.size(0), directory=logging_directory, wdb_log=False)
+    
+
+
+def localize_objects(input_img, cluster_map):
+
+    colors = ["orange", "blue", "red", "yellow", "white", "green", "brown", "purple", "gold", "black"]
+    ticks = np.unique(cluster_map.flatten()).tolist()
+
+    dc = np.zeros(cluster_map.shape)
+    for i in range(cluster_map.shape[0]):
+        for j in range(cluster_map.shape[1]):
+            dc[i, j] = ticks.index(cluster_map[i, j])
+
+    colormap = matplotlib.colors.ListedColormap(colors)
+
+    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(13, 3))
+    # plt.figure(figsize=(5,3))
+    im = axes[0].imshow(dc, cmap=colormap, interpolation="none", vmin=-0.5, vmax=len(colors) - 0.5)
+    cbar = fig.colorbar(im, ticks=range(len(colors)))
+    axes[1].imshow(input_img)
+    axes[2].imshow(dc, cmap=colormap, interpolation="none", vmin=-0.5, vmax=len(colors) - 0.5)
+    axes[2].imshow(input_img, alpha=0.5)
+    # plt.show(block=True)
+    # plt.close()
+    with io.BytesIO() as buffer:
+        fig.savefig(buffer, format='png')
+        buffer.seek(0)
+        return np.asarray(Image.open(buffer))
+
+
+def convert_list_to_video(frames_list, name, speed, directory="", wdb_log=False):
+    frames_list = [Image.fromarray(frame) for frame in frames_list]
+    frames_list[0].save(f"{directory}{name}.gif", save_all=True, append_images=frames_list[1:], duration=speed, loop=0)
+    if wdb_log:
+        wandb.log({name: wandb.Video(f"{directory}{name}.gif", fps=4, format="gif")})

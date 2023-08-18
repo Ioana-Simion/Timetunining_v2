@@ -5,8 +5,7 @@ import torch.nn.functional as F
 import torchvision
 import timm
 from abc import ABCMeta, abstractmethod
-
-import tqdm
+from tqdm import tqdm
 # from mmcv.cnn import ConvModule
 
 
@@ -212,14 +211,14 @@ class FeatureExtractor(torch.nn.Module):
 
 
 class FeatureForwarder(torch.nn.Module):
-    def __init__(self, feature_extractor, context_frames, context_window, topk, feature_head=None):
+    def __init__(self, spatial_resolution, context_frames, context_window, topk, feature_head=None):
         super().__init__()
-        self.feature_extractor = feature_extractor
+        self.spatial_resolution = spatial_resolution
         self.feature_head = feature_head
         self.context_frames = context_frames
         self.context_window = context_window
         self.topk = topk  
-        self.mask_neighborhood = self.restrict_neighborhood(self.feature_extractor.eval_spatial_resolution, self.feature_extractor.eval_spatial_resolution, self.context_window)
+        self.mask_neighborhood = self.restrict_neighborhood(self.spatial_resolution, self.spatial_resolution, self.context_window)
 
     
     def restrict_neighborhood(self, h, w, size_mask_neighborhood):
@@ -240,17 +239,13 @@ class FeatureForwarder(torch.nn.Module):
     
 
     def forward(self, feature_list, first_segmentation_map):
-        spatial_resolution = self.feature_extractor.eval_spatial_resolution
-        scores = first_segmentation_map.view(spatial_resolution, spatial_resolution, -1)
-        scores = scores.permute(2, 0, 1)  
-        first_seg = nn.functional.interpolate(first_seg.type(torch.DoubleTensor), size=(spatial_resolution, spatial_resolution), mode="nearest")
-        # first_seg = first_seg.squeeze(0)
-
+        down_sampled_first_seg = nn.functional.interpolate(first_segmentation_map.type(torch.DoubleTensor).unsqueeze(0), size=(self.spatial_resolution, self.spatial_resolution), mode="nearest")
+        first_seg = down_sampled_first_seg
         # The queue stores the n preceeding frames
         que = queue.Queue(self.context_frames)
-        
-        features = features.squeeze()
-        frame1_feat = features.T
+        frame1_feat = feature_list[0]
+        frame1_feat = frame1_feat.squeeze()
+        frame1_feat = frame1_feat.T
         
         segmentation_list = []
         for cnt in tqdm(range(1, feature_list.size(0))):
@@ -260,7 +255,7 @@ class FeatureForwarder(torch.nn.Module):
             used_frame_feats = [frame1_feat] + [pair[0] for pair in list(que.queue)]
             used_segs = [first_seg] + [pair[1] for pair in list(que.queue)]
 
-            frame_tar_avg, feat_tar, mask_neighborhood = self.label_propagation(feature_tar, used_frame_feats, used_segs, mask_neighborhood)
+            frame_tar_avg, feat_tar = self.label_propagation(feature_tar, used_frame_feats, used_segs)
 
             # pop out oldest frame if neccessary
             if que.qsize() == self.context_frames:
@@ -281,9 +276,8 @@ class FeatureForwarder(torch.nn.Module):
         """
         ## we only need to extract feature of the target frame
 
-        h = w = self.feature_extractor.eval_spatial_resolution
-        features = feature_tar.squeeze()
-        return_feat_tar = features.T
+        h = w = self.spatial_resolution
+        return_feat_tar = feature_tar.squeeze().T
         feat_tar = feature_tar
         ncontext = len(list_frame_feats)
         feat_sources = torch.stack(list_frame_feats) # nmb_context x dim x h*w
@@ -293,13 +287,14 @@ class FeatureForwarder(torch.nn.Module):
 
         feat_tar = feat_tar.unsqueeze(0).repeat(ncontext, 1, 1)
         aff = torch.exp(torch.bmm(feat_tar, feat_sources) / 0.1) # nmb_context x h*w (tar: query) x h*w (source: keys)
-        aff = aff.to(features.device)
+        aff = aff.to(feat_tar.device)
         if self.context_frames > 0:
-            if mask_neighborhood is None:
-                mask_neighborhood = self.restrict_neighborhood(h, w, self.context_window)
-                mask_neighborhood = mask_neighborhood.unsqueeze(0).repeat(ncontext, 1, 1)
-                mask_neighborhood = mask_neighborhood.to(features.device)
-            aff =  aff * mask_neighborhood
+            if self.mask_neighborhood is None:
+                self.mask_neighborhood = self.restrict_neighborhood(h, w, self.context_window)
+                self.mask_neighborhood = self.mask_neighborhood.unsqueeze(0).repeat(ncontext, 1, 1)
+                self.mask_neighborhood = self.mask_neighborhood.to(feat_tar.device)
+            self.mask_neighborhood = self.mask_neighborhood.to(aff.device)
+            aff =  aff * self.mask_neighborhood
 
         aff = aff.transpose(2, 1).reshape(-1, h * w) # nmb_context*h*w (source: keys) x h*w (tar: queries)
         tk_val, _ = torch.topk(aff, dim=0, k=self.topk)
@@ -309,13 +304,14 @@ class FeatureForwarder(torch.nn.Module):
         aff = aff / torch.sum(aff, keepdim=True, axis=0)
         # aff = aff.softmax(dim=0)
 
-        list_segs = [s.to(features.device) for s in list_segs]
+        list_segs = [s.to(feat_tar.device) for s in list_segs]
         segs = torch.cat(list_segs)
         nmb_context, C, h, w = segs.shape
         segs = segs.reshape(nmb_context, C, -1).transpose(2, 1).reshape(-1, C).T # C x nmb_context*h*w
         seg_tar = torch.mm(segs.double(), aff.double())
         seg_tar = seg_tar.reshape(1, C, h, w)
-        return seg_tar, return_feat_tar, mask_neighborhood
+        return seg_tar, return_feat_tar
+
 
 if __name__ == "__main__":
 

@@ -1,10 +1,14 @@
+import argparse
+import os
+from sqlite3 import Time
+import time
 import torch
 from torchvision import transforms
 from pytorchvideo.data import Ucf101, make_clip_sampler
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from clustering import PerDatasetClustering
-from data_loader import PascalVOCDataModule
+from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule
 from eval_metrics import PredsmIoU
 from models import FeatureExtractor
 from my_utils import overlay, denormalize_video
@@ -28,7 +32,8 @@ from matplotlib.colors import ListedColormap
 from optimizer import PatchCorrespondenceOptimizer
 import torchvision.transforms as trn
 
-from transformations import Compose, Resize
+from image_transformations import Compose, Resize
+import video_transformations
 
 project_name = "TimeTuning_v2"
 ## generate ListeColorMap of distinct colors
@@ -75,48 +80,65 @@ class CorrespondenceDetection():
         patch_size = h // spatial_resolution
         crops = crops.reshape(bs, h // patch_size, patch_size, w // patch_size, patch_size).permute(0, 1, 3, 2, 4)
         crops = crops.flatten(3, 4)
-        croped_feature_mask = crops.sum(-1) > 0 ## size (bs, spatial_resolution, spatial_resolution)
+        cropped_feature_mask = crops.sum(-1) > 0 ## size (bs, spatial_resolution, spatial_resolution)
         ## find the idx of the croped features_mask
         features1 = F.normalize(features1, dim=-1)
         features2 = F.normalize(features2, dim=-1)
         similarities = torch.einsum('bxyd,bkzd->bxykz', features1, features2)
         most_similar_features_mask = torch.zeros(bs, spatial_resolution, spatial_resolution)
         revised_crop = torch.zeros(bs, spatial_resolution, spatial_resolution)
-        similarities = similarities * self.neihbourhood.unsqueeze_(0)
-        for i, similarity in enumerate(similarities):
-            croped_feature_idx = croped_feature_mask[i].nonzero()
-            for j, mask_idx in enumerate(croped_feature_idx):
-                # print(mask_idx)
-                revised_crop[i, mask_idx[0], mask_idx[1]] = 1
-                min_x, max_x = max(0, mask_idx[0] - self.window_size), min(spatial_resolution, mask_idx[0] + self.window_size)
-                min_y, max_y = max(0, mask_idx[1] - self.window_size), min(spatial_resolution, mask_idx[1] + self.window_size)
-                neiborhood_similarity = similarity[mask_idx[0], mask_idx[1], min_x:max_x, min_y:max_y]
-                max_value = neiborhood_similarity.max()
-                indices = (neiborhood_similarity == max_value).nonzero()[0]
-                label_patch_number = (indices[0] + min_x) * spatial_resolution + (indices[1] + min_y)
-                most_similar_features_mask[i, mask_idx[0], mask_idx[1]] = label_patch_number
+        self.neihbourhood = self.neihbourhood.to(features1.device)
+        similarities = similarities * self.neihbourhood.unsqueeze(0)
+        similarities = similarities.flatten(3, 4)
+        true_coords  = torch.argwhere(cropped_feature_mask[0])
+        min_coords = true_coords.min(0).values
+        max_coords = true_coords.max(0).values
+        rectangle_shape = max_coords - min_coords + 1
+        crop_h, crop_w = rectangle_shape
+        most_similar_patches = similarities.argmax(-1)
+        most_similar_cropped_patches = most_similar_patches[cropped_feature_mask]
+        most_similar_cropped_patches = most_similar_cropped_patches.reshape(bs, crop_h, crop_w)
 
-        resized_most_similar_features_mask = torch.nn.functional.interpolate(most_similar_features_mask.unsqueeze(0), size=(h, w), mode='nearest').squeeze(0)
-        resized_revised_crop = torch.nn.functional.interpolate(revised_crop.unsqueeze(0), size=(h, w), mode='nearest').squeeze(0)
-        return resized_most_similar_features_mask, resized_revised_crop
+        # for i, similarity in enumerate(similarities):
+        #     croped_feature_idx = croped_feature_mask[i].nonzero()
+        #     for j, mask_idx in enumerate(croped_feature_idx):
+        #         # print(mask_idx)
+        #         revised_crop[i, mask_idx[0], mask_idx[1]] = 1
+        #         min_x, max_x = max(0, mask_idx[0] - self.window_size), min(spatial_resolution, mask_idx[0] + self.window_size)
+        #         min_y, max_y = max(0, mask_idx[1] - self.window_size), min(spatial_resolution, mask_idx[1] + self.window_size)
+        #         neiborhood_similarity = similarity[mask_idx[0], mask_idx[1], min_x:max_x, min_y:max_y]
+        #         max_value = neiborhood_similarity.max()
+        #         indices = (neiborhood_similarity == max_value).nonzero()[0]
+        #         label_patch_number = (indices[0] + min_x) * spatial_resolution + (indices[1] + min_y)
+        #         most_similar_features_mask[i, mask_idx[0], mask_idx[1]] = label_patch_number
+
+        revised_crop = cropped_feature_mask.float() 
+        return most_similar_cropped_patches, revised_crop
     
 
 
 class PatchPredictionModel(torch.nn.Module):
-    def __init__(self, input_size, vit_model, prediction_window_size=2, logger=None):
+    def __init__(self, input_size, vit_model, prediction_window_size=2, masking_ratio=0.8, crop_size=96, logger=None):
         super(PatchPredictionModel, self).__init__()
         self.input_size = input_size
         self.eval_spatial_resolution = input_size // 16
         self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution)
-        self.feature_extractor = self.feature_extractor.to(device)
         self.prediction_window_size = prediction_window_size
         self.CorDet = CorrespondenceDetection(window_szie=self.prediction_window_size)
-        self.device = device
+        self.masking_ratio = masking_ratio
+        self.crop_size = crop_size
         self.logger = logger
         self.criterion = torch.nn.CrossEntropyLoss()
-        self.key_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model)
-        self.query_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model)
-        self.value_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model)
+        self.key_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model, bias=False)
+        self.query_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model, bias=False)
+        self.value_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model, bias=False)
+        self.mlp_head = torch.nn.Sequential(
+            torch.nn.Linear(self.feature_extractor.d_model, 1024),
+            torch.nn.GELU(),
+            torch.nn.Linear(1024, 1024),
+            torch.nn.GELU(),
+            torch.nn.Linear(1024, self.eval_spatial_resolution ** 2),
+        )
         self.lc = torch.nn.Linear(self.feature_extractor.d_model, self.eval_spatial_resolution ** 2)
         self.feature_extractor.freeze_feature_extractor(["blocks.11", "blocks.10"])
         self.cross_attention_layer = torch.nn.MultiheadAttention(embed_dim=self.feature_extractor.d_model, num_heads=1, batch_first=True)
@@ -140,14 +162,14 @@ class PatchPredictionModel(torch.nn.Module):
         """
         bs, np, d_model = features.shape
         ## select 0.2 of the features randomly for each sample
-        mask = torch.zeros(bs, np).to(self.device)
+        mask = torch.zeros(bs, np).to(features.device)
         ids = torch.randperm(np)[:int(np * percentage)]
         mask[:, ids] = 1
         mask = mask.unsqueeze(-1).repeat(1, 1, d_model)
         features = features * mask
         return features
     
-    def cross_attention(self, query, key, value, num_heads=1):
+    def cross_attention(self, query, key, value):
         """
         query: [bs, nq, d_model]
         key: [bs, np, d_model]
@@ -156,16 +178,16 @@ class PatchPredictionModel(torch.nn.Module):
         return: [bs, nq, d_model]
         """
         # Parameters
-        embedding_dim = query.shape[-1]
         output, attention_weights = self.cross_attention_layer(query, key, value)
         return output
 
     
-    def train_step(self, imgs1, imgs2, crop_size):
+    def train_step(self, imgs1, imgs2):
         bs = imgs1.shape[0]
-        crop = generate_random_crop(imgs1, crop_size)
+        crop = generate_random_crop(imgs1, self.crop_size)
         img1_features, img2_features = self.forward(imgs1, imgs2)
         sailiancy, revised_crop = self.CorDet(img1_features, img2_features, crop)
+        revised_crop = F.interpolate(revised_crop.unsqueeze(1), size=(imgs1.size(-2), imgs1.size(-1)), mode='nearest').squeeze(1)
         ## find the szie of revised_crop where the value is not 0
         idxs = (revised_crop != 0).nonzero()
         min_x, max_x = idxs[:, 1].min(), idxs[:, 1].max()
@@ -175,20 +197,20 @@ class PatchPredictionModel(torch.nn.Module):
         crop_mask = revised_crop > 0
         ## select the cropped area and the corresponding labels 
         cropped_area = imgs1[crop_mask.unsqueeze(1).repeat(1, 3, 1, 1)]
-        croped_labels = sailiancy[crop_mask]
+        cropped_labels = sailiancy
         cropped_area = cropped_area.reshape(bs, 3, h, w)
-        croped_labels = croped_labels.reshape(bs, h, w)
-        ## resize cropped_area to (bs, 3, 224, 224) and croped_labels to (bs, 224, 224)
         cropped_area = torch.nn.functional.interpolate(cropped_area, size=(96, 96), mode='bilinear')
-        croped_labels = torch.nn.functional.interpolate(croped_labels.unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
-        croped_labels = croped_labels.long().to(self.device)
-        masked_features2 = self.mask_features(img2_features.flatten(1, 2))
+        cropped_labels = torch.nn.functional.interpolate(cropped_labels.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
+        cropped_labels = cropped_labels.long().to(imgs1.device)
+        masked_features2 = self.mask_features(img1_features.flatten(1, 2), self.masking_ratio)
         cropped_area_features, _ = self.feature_extractor.forward_features(cropped_area) ## size (bs, 36, d_model)
         cross_attented_features = self.cross_attention(self.query_head(cropped_area_features), self.key_head(masked_features2), self.value_head(masked_features2)) ## size (bs, 36, d_model)
-        predictions = self.lc(cross_attented_features) ## size (bs, 36, 196)
-        predictions = predictions.reshape(bs, 6, 6, 196).permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
-        predictions = torch.nn.functional.interpolate(predictions, size=(96, 96), mode='bilinear')
-        loss = self.criterion(predictions, croped_labels)
+        cross_attented_features = cross_attented_features.reshape(bs, 6, 6, cross_attented_features.size(-1)).permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+        resized_cross_attented_features = torch.nn.functional.interpolate(cross_attented_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
+        predictions = self.mlp_head(resized_cross_attented_features) ## size (bs, 36, 196)
+        predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+        # predictions = torch.nn.functional.interpolate(predictions, size=(96, 96), mode='bilinear')
+        loss = self.criterion(predictions, cropped_labels)
         return loss
     
 
@@ -198,11 +220,11 @@ class PatchPredictionModel(torch.nn.Module):
             {"params": self.key_head.parameters(), "lr": 1e-4},
             {"params": self.query_head.parameters(), "lr": 1e-4},
             {"params": self.value_head.parameters(), "lr": 1e-4},
-            {"params": self.lc.parameters(), "lr": 1e-4},
+            {"params": self.mlp_head.parameters(), "lr": 1e-4},
         ]
 
 
-    def visualize(self, img1, img2, crops):
+    def visualize(self, img1, img2, crops, epoch=0):
         ## denormalize with imagenet stats
         device = img1.device
         dn_img1 = img1 * torch.Tensor([0.225, 0.225, 0.225]).to(device).view(1, 3, 1, 1) + torch.Tensor([0.45, 0.45, 0.45]).to(device).view(1, 3, 1, 1)
@@ -213,20 +235,37 @@ class PatchPredictionModel(torch.nn.Module):
         crop = crops[0]
         sailiancy = sailiancies[0]
         revised_crop = revised_crops[0]
+        revised_sailiancy = torch.zeros((self.feature_extractor.eval_spatial_resolution, self.feature_extractor.eval_spatial_resolution))
+        sailiancy_h, sailiancy_w = sailiancy.shape
+        print(sailiancy.unique())
+        rows = sailiancy // self.feature_extractor.eval_spatial_resolution
+        cols = sailiancy % self.feature_extractor.eval_spatial_resolution
+        unique_numbers = torch.unique(sailiancy)
+        revised_crop[(revised_crop == 1)] = sailiancy.cpu().float().flatten()
+        revised_crop = revised_crop.reshape(self.feature_extractor.eval_spatial_resolution, self.feature_extractor.eval_spatial_resolution)
+        for i in range(sailiancy_h):
+            for j in range(sailiancy_w):
+                revised_sailiancy[rows[i, j], cols[i, j]] = sailiancy[i, j]
+        for i, number in enumerate(unique_numbers.cpu()):
+            revised_sailiancy[revised_sailiancy == number] = i + 1
+            revised_crop[revised_crop == number] = i + 1
+
+        revised_crop = torch.nn.functional.interpolate(revised_crop.unsqueeze(0).unsqueeze(0), size=(dn_img1.size(-2), dn_img1.size(-1)), mode='nearest').squeeze(0).squeeze(0)
         plt.imshow(dn_img1.permute(1, 2, 0).detach().cpu().numpy())
         plt.imshow(crop.cpu().numpy(), alpha=0.5)
-        plt.savefig("Temp/overlaied_img1.png")
+        plt.savefig(f"Temp/{epoch}_overlayed_img1.png")
         overlaied_img2 = overlay(dn_img2.permute(1, 2, 0).detach().cpu().numpy(), crop.cpu().numpy())
         overlaied_img2 = torch.from_numpy(overlaied_img2).permute(2, 0, 1)
         # wandb.log({"overlaied_img2": wandb.Image(overlaied_img2)})
         plt.imshow(dn_img1.permute(1, 2, 0).detach().cpu().numpy())
         plt.imshow(revised_crop.cpu().numpy(), alpha=0.5, cmap=cmap)
-        plt.savefig("Temp/revised_crop_img1.png")
+        plt.savefig(f"Temp/{epoch}_revised_crop_img1.png")
         plt.imshow(dn_img2.permute(1, 2, 0).detach().cpu().numpy())
-        plt.imshow(sailiancy.detach().cpu().numpy(), alpha=0.5, cmap=cmap)
-        plt.savefig("Temp/overlaied_img2.png")
-        overlaied_img1 = overlay(dn_img1.permute(1, 2, 0).detach().cpu().numpy(), sailiancy.detach().cpu().numpy())
-        overlaied_img1 = torch.from_numpy(overlaied_img1).permute(2, 0, 1)
+        resized_revised_sailiancy = torch.nn.functional.interpolate(revised_sailiancy.unsqueeze(0).unsqueeze(0), size=(dn_img2.size(-2), dn_img2.size(-1)), mode='nearest').squeeze(0).squeeze(0)
+        plt.imshow(resized_revised_sailiancy.detach().cpu().numpy(), alpha=0.5, cmap=cmap)
+        plt.savefig(f"Temp/{epoch}_overlayed_img2.png")
+        # overlaied_img1 = overlay(dn_img1.permute(1, 2, 0).detach().cpu().numpy(), sailiancy.detach().cpu().numpy())
+        # overlaied_img1 = torch.from_numpy(overlaied_img1).permute(2, 0, 1)
         # wandb.log({"overlaied_img1": wandb.Image(overlaied_img1)})
 
 
@@ -252,15 +291,17 @@ class PatchPredictionTrainer():
         self.optimizer = None
         self.num_epochs = num_epochs
         self.logger = logger
+        self.logger.watch(patch_prediction_model, log="all", log_freq=10)
     
     def visualize(self):
         for i, batch in enumerate(self.dataloader):
-            video = batch['video']
-            video = video.permute(0, 2, 1, 3, 4)
-            imgs1, imgs2 = video[:, 0], video[:, 1]
+            datum, annotations = batch
+            annotations = annotations.squeeze(1)
+            datum = datum.squeeze(1)
+            imgs1, imgs2 = datum[:, 0], datum[:, 1]
             imgs1, imgs2 = imgs1.to(self.device), imgs2.to(self.device)
             crop = generate_random_crop(imgs1, 56)
-            self.patch_prediction_model.visualize(imgs1, imgs2, crop)
+            self.patch_prediction_model.visualize(imgs1, imgs2, crop, i)
     
     def setup_optimizer(self, optimization_config):
         model_params = self.patch_prediction_model.get_optimization_params()
@@ -272,9 +313,7 @@ class PatchPredictionTrainer():
         init_weight_decay = optimization_config['init_weight_decay']
         peak_weight_decay = optimization_config['peak_weight_decay']
         ## read the first batch from dataloader to get the number of iterations
-        num_itr = 11000
-        # for _ in dataloader:
-        #     num_itr += 1
+        num_itr = len(self.dataloader)
         max_itr = self.num_epochs * num_itr
         self.optimizer = PatchCorrespondenceOptimizer(model_params, init_lr, peak_lr, decay_half_life, warmup_steps, grad_norm_clip, init_weight_decay, peak_weight_decay, max_itr)
         self.optimizer.setup_optimizer()
@@ -283,25 +322,37 @@ class PatchPredictionTrainer():
 
     def train_one_epoch(self):
         self.patch_prediction_model.train()
+        epoch_loss = 0
+        before_loading_time = time.time()
         for i, batch in enumerate(self.dataloader):
-            video = batch['video']
-            video = video.permute(0, 2, 1, 3, 4)
-            imgs1, imgs2 = video[:, 0], video[:, 1]
+            after_loading_time = time.time()
+            print("Loading Time: {}".format(after_loading_time - before_loading_time))
+            datum, annotations = batch
+            annotations = annotations.squeeze(1)
+            datum = datum.squeeze(1)
+            imgs1, imgs2 = datum[:, 0], datum[:, 1]
             imgs1, imgs2 = imgs1.to(self.device), imgs2.to(self.device)
-            loss = self.patch_prediction_model.train_step(imgs1, imgs2, crop_size=56)
+            loss = self.patch_prediction_model.train_step(imgs1, imgs2)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             self.optimizer.update_lr()
-            if i % 10 == 0:
-                print("Iteration: {} Loss: {}".format(i, loss.item()))
-                wandb.log({"loss": loss.item()})
+            epoch_loss += loss.item()
+            print("Iteration: {} Loss: {}".format(i, loss.item()))
+            self.logger.log({"loss": loss.item()})
+            lr = self.optimizer.get_lr()
+            self.logger.log({"lr": lr})
+            before_loading_time = time.time()
+        epoch_loss /= i
+        print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
         for epoch in range(self.num_epochs):
             print("Epoch: {}".format(epoch))
             self.train_one_epoch()
-            self.validate(epoch)
+            if epoch % 4 == 0:
+                self.validate(epoch)
+            # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
             # self.validate(epoch)
     
@@ -337,65 +388,55 @@ class PatchPredictionTrainer():
             valid_cluster_maps = cluster_maps[valid_idx]
             metric.update(valid_target, valid_cluster_maps)
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
-            # self.logger.log({"val_k=gt_miou": jac})
-            print(f"Epoch : {epoch}, eval finished, miou: {jac}")
+            self.logger.log({"val_k=gt_miou": jac})
+            # print(f"Epoch : {epoch}, eval finished, miou: {jac}")
 
 
-            
 
 
-if __name__ == "__main__":
-    device = "cuda:3"
-    ucf101_path = '/ssdstore/ssalehi/ucf101/data/UCF101'
-    clip_durations = 2
-    batch_size = 64
-    num_workers = 4
-    input_size = 224
+def run(args):
+    device = args.device
+    ucf101_path = args.ucf101_path
+    clip_durations = args.clip_durations
+    batch_size = args.batch_size
+    num_workers = args.num_workers
+    input_size = args.input_size
+    num_epochs = args.num_epochs
+    masking_ratio = args.masking_ratio
+    crop_size = args.crop_size
+
     logger = wandb.init(project=project_name, group='exp_patch_correspondence', job_type='debug')
-    train_transform = trn.Compose(
-        [
-        ApplyTransformToKey(
-            key="video",
-            transform=trn.Compose(
-                [
-                UniformTemporalSubsample(8),
-                Lambda(lambda x: x / 255.0),
-                Normalize((0.45, 0.45, 0.45), (0.225, 0.225, 0.225)),
-                RandomShortSideScale(min_size=256, max_size=320),
-                trn.Resize((224, 224)),
-                RandomHorizontalFlip(p=0.5),
-                ]
-            ),
-            ),
-        ]
-    )
-    train_dataset = Ucf101(
-        data_path=ucf101_path,
-        clip_sampler=make_clip_sampler("random", clip_durations),
-        decode_audio=False,
-        transform=train_transform,
-    )
-
-    dataloader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,  # Adjust the batch size according to your system's capacity
-        num_workers=4,  # Adjust the number of workers based on your system's capacity
-        pin_memory=True,
-    )
+    rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
+    data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
+    data_transform = video_transformations.Compose(data_transform_list)
+    video_transform_list = [video_transformations.Resize((224, 224), 'bilinear'), video_transformations.ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225])] #video_transformations.RandomResizedCrop((224, 224))
+    video_transform = video_transformations.Compose(video_transform_list)
+    num_clips = 1
+    num_workers = 8
+    num_clip_frames = 4
+    regular_step = 1
+    transformations_dict = {"data_transforms": None, "target_transforms": None, "shared_transforms": video_transform}
+    prefix = "/ssdstore/ssalehi/dataset"
+    data_path = os.path.join(prefix, "train1/JPEGImages/")
+    annotation_path = os.path.join(prefix, "train1/Annotations/")
+    meta_file_path = os.path.join(prefix, "train1/meta.json")
+    path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
+    sampling_mode = SamplingMode.DENSE
+    video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    video_data_module.setup(transformations_dict)
+    data_loader = video_data_module.get_data_loader()
     
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vitb16')
-    patch_prediction_model = PatchPredictionModel(224, vit_model, logger=logger)
+    patch_prediction_model = PatchPredictionModel(224, vit_model, masking_ratio=masking_ratio, crop_size=crop_size, logger=logger)
     optimization_config = {
         'init_lr': 1e-4,
         'peak_lr': 1e-3,
-        'decay_half_life': 10000,
+        'decay_half_life': 0,
         'warmup_steps': 0,
         'grad_norm_clip': 1.0,
         'init_weight_decay': 1e-2,
         'peak_weight_decay': 1e-2
     }
-
-
     image_val_transform = trn.Compose([trn.Resize((input_size, input_size)), trn.ToTensor(), trn.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.255])])
     shared_val_transform = Compose([
         Resize(size=(input_size, input_size)),
@@ -404,11 +445,29 @@ if __name__ == "__main__":
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-
-    patch_prediction_trainer = PatchPredictionTrainer(dataloader, test_dataloader, patch_prediction_model, 100, device, logger)
+    patch_prediction_trainer = PatchPredictionTrainer(data_loader, test_dataloader, patch_prediction_model, num_epochs, device, logger)
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
-    patch_prediction_trainer.visualize()
+    # patch_prediction_trainer.visualize()
+
+
+            
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--device', type=str, default="cuda:2")
+    parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
+    parser.add_argument('--clip_durations', type=int, default=2)
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--input_size', type=int, default=224)
+    parser.add_argument('--num_epochs', type=int, default=400)
+    parser.add_argument('--crop_size', type=int, default=64)
+    parser.add_argument('--masking_ratio', type=float, default=1)
+    args = parser.parse_args()
+    run(args)
+
 
 
         

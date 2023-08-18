@@ -44,3 +44,9 @@ Experiments to do :
 # Questions
 
 1 - It is not obvious if the background is being excluded from the computation or not. I should check it out. 
+
+# 10_08_2023
+
+Experiments : 
+
+1 - Predict the location of each crop

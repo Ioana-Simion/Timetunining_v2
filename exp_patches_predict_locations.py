@@ -1,7 +1,7 @@
 import torch
 import sys
 from data_loader import PascalVOCDataModule
-from transformations import Compose, RandomResizedCrop, RandomHorizontalFlip, Resize
+from image_transformations import Compose, RandomResizedCrop, RandomHorizontalFlip, Resize
 from torchvision import transforms
 import torchvision.transforms as trn
 import wandb

@@ -10,7 +10,7 @@ import time
 import os
 from eval_metrics import PredsmIoU
 import numpy as np
-from transformations import Compose, RandomResizedCrop, RandomHorizontalFlip, Resize
+from image_transformations import Compose, RandomResizedCrop, RandomHorizontalFlip, Resize
 from torchvision import transforms
 from timm.models.vision_transformer import vit_small_patch16_224, vit_base_patch8_224
 import timm
