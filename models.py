@@ -313,6 +313,53 @@ class FeatureForwarder(torch.nn.Module):
         return seg_tar, return_feat_tar
 
 
+class CrossAttentionBlock(nn.Module):
+
+    def __init__(self, input_dim, num_heads, dim_feedforward, dropout=0.0):
+        """
+        Inputs:
+            input_dim - Dimensionality of the input
+            num_heads - Number of heads to use in the attention block
+            dim_feedforward - Dimensionality of the hidden layer in the MLP
+            dropout - Dropout probability to use in the dropout layers
+        """
+        super().__init__()
+
+        # Attention layer
+        self.cross_attention = nn.MultiheadAttention(embed_dim=input_dim, kdim=input_dim, vdim=input_dim, num_heads=num_heads, batch_first=True)
+
+        # Two-layer MLP
+        self.linear_net = nn.Sequential(
+            nn.Linear(input_dim, dim_feedforward),
+            nn.Dropout(dropout),
+            nn.GELU(),
+            nn.Linear(dim_feedforward, input_dim)
+        )
+
+        # Layers to apply in between the main layers
+        self.norm1 = nn.LayerNorm(input_dim)
+        self.norm2 = nn.LayerNorm(input_dim)
+        self.q_norm = nn.LayerNorm(input_dim)
+        self.k_norm = nn.LayerNorm(input_dim)
+        self.v_norm = nn.LayerNorm(input_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, q, k, v):
+        # Attention part
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        v = self.v_norm(v)
+        output, attention_weights = self.cross_attention(q, k, v)
+        x = q + self.dropout(output)
+        x = self.norm1(x)
+
+        # MLP part
+        linear_out = self.linear_net(x)
+        x = x + self.dropout(linear_out)
+        x = self.norm2(x)
+
+        return x
+
 if __name__ == "__main__":
 
     img = torch.randn(1, 3, 224, 224)

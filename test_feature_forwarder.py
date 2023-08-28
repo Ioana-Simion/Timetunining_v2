@@ -36,12 +36,13 @@ def run(args):
     video_transform = video_transformations.Compose(video_transform_list)
     transformations_dict = {"data_transforms": None, "target_transforms": None, "shared_transforms": video_transform}
     prefix = "/ssdstore/ssalehi/dataset"
-    data_path = os.path.join(prefix, "train1/JPEGImages/")
-    annotation_path = os.path.join(prefix, "train1/Annotations/")
-    meta_file_path = os.path.join(prefix, "train1/meta.json")
+    data_path = os.path.join(prefix, "davis_2021/davis_data/JPEGImages/")
+    annotation_path = os.path.join(prefix, "davis_2021/DAVIS/Annotations/")
+    # meta_file_path = os.path.join(prefix, "train1/meta.json")
+    meta_file_path = None
     path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
     sampling_mode = SamplingMode.Full
-    video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    video_data_module = VideoDataModule("davis", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
     data_loader = video_data_module.get_data_loader()
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vitb16')
@@ -53,6 +54,7 @@ def run(args):
     feature_extractor.eval()
 
     predictions = []
+    scores = [] 
     for batch_idx, batch in enumerate(data_loader):
         inputs, annotations = batch
         inputs = inputs.to(device).squeeze()
@@ -75,7 +77,9 @@ def run(args):
         predsmIoU = PredsmIoU(num_classes, num_classes)
         predsmIoU.update(prediction.flatten(), annotations[1:].flatten())
         score, tp, fp, fn, reordered_preds, matched_bg_clusters = predsmIoU.compute(True, many_to_one, precision_based=precision_based)
-        print(score)
+        scores.append(score)
+    
+    print(f"Scored {sum(scores) / len(scores)}")
 
 def adjust_max(input):
     input = input
@@ -87,7 +91,7 @@ def adjust_max(input):
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
-    args.add_argument("--device", type=str, default="cuda:7")
+    args.add_argument("--device", type=str, default="cuda:4")
     args.add_argument("--batch_size", type=int, default=1)
     args.add_argument("--num_workers", type=int, default=8)
     args.add_argument("--input_size", type=int, default=224)

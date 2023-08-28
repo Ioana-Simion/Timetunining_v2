@@ -10,7 +10,8 @@ import torch.nn.functional as F
 from clustering import PerDatasetClustering
 from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule
 from eval_metrics import PredsmIoU
-from models import FeatureExtractor
+from evaluator import LinearFinetuneModule
+from models import CrossAttentionBlock, FeatureExtractor
 from my_utils import overlay, denormalize_video
 from pytorchvideo.transforms import (
     ApplyTransformToKey,
@@ -44,6 +45,7 @@ project_name = "TimeTuning_v2"
 cmap = ListedColormap(['#FF0000', '#0000FF', '#008000', '#A52A2A', '#FFFF00', '#FFA500', '#800080', '#FFFFFF', '#000000', '#800000', '#808000', '#008080', '#000080', '#808080', '#C0C0C0'])
 
 def generate_random_crop(img, crop_size):
+    ## generate a random crop mask with all 1s on the img with  crop_scale=(0.05, 0.3), and size crop_size
     bs, c, h, w = img.shape
     crop = torch.zeros((bs, h, w))
     x = torch.randint(0, h - crop_size, (1,)).item()
@@ -52,10 +54,79 @@ def generate_random_crop(img, crop_size):
     return crop
 
 
+def random_crop_mask(img, aspect_ratio_range=(3/4, 4/3), scale_range=(0.05, 0.3), mask_height=None, mask_width=None):
+    """
+    Generate a random crop mask with a given aspect ratio.
+    
+    H, W: Image dimensions
+    aspect_ratio: Desired aspect ratio = mask_width/mask_height
+    mask_height or mask_width: Specify one of them and the other will be computed using aspect_ratio.
+    """
+    bs, c, H, W = img.shape
+    # Extract values from the provided ranges
+    min_aspect, max_aspect = aspect_ratio_range
+    min_scale, max_scale = scale_range
+    
+    # Randomly select an aspect ratio and scale within the provided range
+    random_aspect_ratio = torch.rand(1).item() * (max_aspect - min_aspect) + min_aspect
+    random_scale = torch.rand(1).item() * (max_scale - min_scale) + min_scale
+    
+    # Compute mask dimensions based on random scale and aspect ratio
+    mask_width = int(W * random_scale * random_aspect_ratio)
+    mask_height = int(W * random_scale / random_aspect_ratio)
+
+    # Check if mask dimensions exceed the image dimensions
+    if mask_height > H or mask_width > W:
+        raise ValueError("Mask dimensions exceed the image dimensions.")
+
+    # Generate a random starting point
+    y = torch.randint(0, H - mask_height + 1, (1,)).item()
+    x = torch.randint(0, W - mask_width + 1, (1,)).item()
+
+    # Create the mask with all zeros and set the crop area to ones
+    mask = torch.zeros((bs, H, W))
+    mask[:, y:y+mask_height, x:x+mask_width] = 1
+
+    return mask
+
+## a function that generates random crop masks for a batch of images
+def generate_random_crop_masks(imgs, aspect_ratio_range=(3/4, 4/3), scale_range=(0.05, 0.3), mask_height=None, mask_width=None):
+
+    bs, c, H, W = imgs.shape
+    # Extract values from the provided ranges
+    min_aspect, max_aspect = aspect_ratio_range
+    min_scale, max_scale = scale_range
+
+    # Randomly select an aspect ratio and scale within the provided range
+    random_aspect_ratio = torch.rand(bs).to(imgs.device) * (max_aspect - min_aspect) + min_aspect
+    random_scale = torch.rand(bs).to(imgs.device) * (max_scale - min_scale) + min_scale
+
+    # Compute mask dimensions based on random scale and aspect ratio
+    mask_width = (W * random_scale * random_aspect_ratio).long()
+    mask_height = (W * random_scale / random_aspect_ratio).long()
+
+    # Check if mask dimensions exceed the image dimensions
+    if (mask_height > H).any() or (mask_width > W).any():
+        raise ValueError("Mask dimensions exceed the image dimensions.")
+    
+    # Generate a random starting point
+    y = torch.randint(0, H - mask_height + 1, (bs,)).to(imgs.device)
+    x = torch.randint(0, W - mask_width + 1, (bs,)).to(imgs.device)
+
+    # Create the mask with all zeros and set the crop area to ones
+    mask = torch.zeros((bs, H, W)).to(imgs.device)
+    for i in range(bs):
+        mask[i, y[i]:y[i]+mask_height[i], x[i]:x[i]+mask_width[i]] = 1
+
+    return mask
+
+
+
 class CorrespondenceDetection():
-    def __init__(self, window_szie, spatial_resolution=14) -> None:
+    def __init__(self, window_szie, spatial_resolution=14, output_resolution=96) -> None:
         self.window_size = window_szie
         self.neihbourhood = self.restrict_neighborhood(spatial_resolution, spatial_resolution, self.window_size)
+        self.output_resolution = output_resolution
 
     
     def restrict_neighborhood(self, h, w, size_mask_neighborhood):
@@ -122,7 +193,7 @@ class PatchPredictionModel(torch.nn.Module):
         super(PatchPredictionModel, self).__init__()
         self.input_size = input_size
         self.eval_spatial_resolution = input_size // 16
-        self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution)
+        self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution, d_model=384)
         self.prediction_window_size = prediction_window_size
         self.CorDet = CorrespondenceDetection(window_szie=self.prediction_window_size)
         self.masking_ratio = masking_ratio
@@ -141,7 +212,7 @@ class PatchPredictionModel(torch.nn.Module):
         )
         self.lc = torch.nn.Linear(self.feature_extractor.d_model, self.eval_spatial_resolution ** 2)
         self.feature_extractor.freeze_feature_extractor(["blocks.11", "blocks.10"])
-        self.cross_attention_layer = torch.nn.MultiheadAttention(embed_dim=self.feature_extractor.d_model, num_heads=1, batch_first=True)
+        self.cross_attention_layer = CrossAttentionBlock(input_dim=self.feature_extractor.d_model, num_heads=12, dim_feedforward=2048)
     
     def forward(self, imgs1, imgs2):
         bs, c, h, w = imgs1.shape
@@ -178,15 +249,16 @@ class PatchPredictionModel(torch.nn.Module):
         return: [bs, nq, d_model]
         """
         # Parameters
-        output, attention_weights = self.cross_attention_layer(query, key, value)
+        output = self.cross_attention_layer(query, key, value)
         return output
 
     
     def train_step(self, imgs1, imgs2):
         bs = imgs1.shape[0]
-        crop = generate_random_crop(imgs1, self.crop_size)
+        # crop = random_crop_mask(imgs1)
+        crop = generate_random_crop_masks(imgs1)
         img1_features, img2_features = self.forward(imgs1, imgs2)
-        sailiancy, revised_crop = self.CorDet(img1_features, img2_features, crop)
+        sailiancy, revised_crop = self.CorDet(img1_features, img1_features, crop)
         revised_crop = F.interpolate(revised_crop.unsqueeze(1), size=(imgs1.size(-2), imgs1.size(-1)), mode='nearest').squeeze(1)
         ## find the szie of revised_crop where the value is not 0
         idxs = (revised_crop != 0).nonzero()
@@ -201,14 +273,17 @@ class PatchPredictionModel(torch.nn.Module):
         cropped_area = cropped_area.reshape(bs, 3, h, w)
         cropped_area = torch.nn.functional.interpolate(cropped_area, size=(96, 96), mode='bilinear')
         cropped_labels = torch.nn.functional.interpolate(cropped_labels.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
+        # cropped_labels = torch.arange(0, 196).reshape(14, 14).unsqueeze(0).repeat(bs, 1, 1)
         cropped_labels = cropped_labels.long().to(imgs1.device)
         masked_features2 = self.mask_features(img1_features.flatten(1, 2), self.masking_ratio)
         cropped_area_features, _ = self.feature_extractor.forward_features(cropped_area) ## size (bs, 36, d_model)
         cross_attented_features = self.cross_attention(self.query_head(cropped_area_features), self.key_head(masked_features2), self.value_head(masked_features2)) ## size (bs, 36, d_model)
         cross_attented_features = cross_attented_features.reshape(bs, 6, 6, cross_attented_features.size(-1)).permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
         resized_cross_attented_features = torch.nn.functional.interpolate(cross_attented_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
-        predictions = self.mlp_head(resized_cross_attented_features) ## size (bs, 36, 196)
+        predictions = self.lc(resized_cross_attented_features) ## size (bs, 36, 196)
         predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+        # predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+        # predictions = cross_attented_features
         # predictions = torch.nn.functional.interpolate(predictions, size=(96, 96), mode='bilinear')
         loss = self.criterion(predictions, cropped_labels)
         return loss
@@ -220,7 +295,8 @@ class PatchPredictionModel(torch.nn.Module):
             {"params": self.key_head.parameters(), "lr": 1e-4},
             {"params": self.query_head.parameters(), "lr": 1e-4},
             {"params": self.value_head.parameters(), "lr": 1e-4},
-            {"params": self.mlp_head.parameters(), "lr": 1e-4},
+            {"params": self.lc.parameters(), "lr": 1e-4},
+            {"params": self.cross_attention_layer.parameters(), "lr": 1e-4},
         ]
 
 
@@ -274,6 +350,44 @@ class PatchPredictionModel(torch.nn.Module):
         with torch.no_grad():
             spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
         return spatial_features
+    
+
+    def validate_step1(self, img):
+        self.feature_extractor.eval()
+        with torch.no_grad():
+            bs = img.shape[0]
+            crop = random_crop_mask(img)
+            img1_features, img2_features = self.forward(img, img)
+            sailiancy, revised_crop = self.CorDet(img1_features, img2_features, crop)
+            revised_crop = F.interpolate(revised_crop.unsqueeze(1), size=(img.size(-2), img.size(-1)), mode='nearest').squeeze(1)
+            ## find the szie of revised_crop where the value is not 0
+            idxs = (revised_crop != 0).nonzero()
+            min_x, max_x = idxs[:, 1].min(), idxs[:, 1].max()
+            min_y, max_y = idxs[:, 2].min(), idxs[:, 2].max()
+            h = max_x - min_x + 1
+            w = max_y - min_y + 1
+            crop_mask = revised_crop > 0
+            ## select the cropped area and the corresponding labels 
+            cropped_area = img[crop_mask.unsqueeze(1).repeat(1, 3, 1, 1)]
+            cropped_labels = sailiancy
+            cropped_area = cropped_area.reshape(bs, 3, h, w)
+            cropped_area = torch.nn.functional.interpolate(cropped_area, size=(96, 96), mode='bilinear')
+            cropped_labels = torch.nn.functional.interpolate(cropped_labels.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
+            # cropped_labels = torch.arange(0, 196).reshape(14, 14).unsqueeze(0).repeat(bs, 1, 1)
+            cropped_labels = cropped_labels.long().to(img.device)
+            masked_features2 = self.mask_features(img1_features.flatten(1, 2), self.masking_ratio)
+            cropped_area_features, _ = self.feature_extractor.forward_features(cropped_area) ## size (bs, 36, d_model)
+            cross_attented_features = self.cross_attention(self.query_head(cropped_area_features), self.key_head(masked_features2), self.value_head(masked_features2)) ## size (bs, 36, d_model)
+            cross_attented_features = cross_attented_features.reshape(bs, 6, 6, cross_attented_features.size(-1)).permute(0, 2, 3, 1) ## size (bs, 196, 6, 6)
+            # resized_cross_attented_features = torch.nn.functional.interpolate(cross_attented_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
+            predictions = self.mlp_head(cross_attented_features) ## size (bs, 36, 196)
+            predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+            loss = self.criterion(predictions, cropped_labels)
+            return loss
+
+    def save(self, path):
+        torch.save(self.state_dict(), path)
+
 
         
 
@@ -300,7 +414,7 @@ class PatchPredictionTrainer():
             datum = datum.squeeze(1)
             imgs1, imgs2 = datum[:, 0], datum[:, 1]
             imgs1, imgs2 = imgs1.to(self.device), imgs2.to(self.device)
-            crop = generate_random_crop(imgs1, 56)
+            crop = random_crop_mask(imgs1)
             self.patch_prediction_model.visualize(imgs1, imgs2, crop, i)
     
     def setup_optimizer(self, optimization_config):
@@ -343,7 +457,7 @@ class PatchPredictionTrainer():
             lr = self.optimizer.get_lr()
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
-        epoch_loss /= i
+        epoch_loss /= (i + 1)
         print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
@@ -351,7 +465,7 @@ class PatchPredictionTrainer():
             print("Epoch: {}".format(epoch))
             self.train_one_epoch()
             if epoch % 4 == 0:
-                self.validate(epoch)
+                self.validate1(epoch)
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
             # self.validate(epoch)
@@ -390,6 +504,44 @@ class PatchPredictionTrainer():
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
             # print(f"Epoch : {epoch}, eval finished, miou: {jac}")
+    
+
+    def validate1(self, epoch, val_spatial_resolution=56):
+        self.patch_prediction_model.eval()
+        losses = []
+        with torch.no_grad():
+            for i, (x, y) in enumerate(self.test_dataloader):
+                target = (y * 255).long()
+                img = x.to(self.device)
+                loss = self.patch_prediction_model.validate_step1(img)  # (B, np, dim)
+                resized_target =  F.interpolate(target.float(), size=(val_spatial_resolution, val_spatial_resolution), mode="nearest").long()
+                losses.append(loss.item())
+            avg_loss = sum(losses) / len(losses)
+            self.logger.log({"val_loss": avg_loss})
+
+
+
+    def train_lc(self, lc_train_dataloader, lc_val_dataloader):
+        best_miou = 0
+        for epoch in range(self.num_epochs):
+            print("Epoch: {}".format(epoch))
+            if epoch % 60 == 0:
+                val_miou = self.lc_validation(lc_train_dataloader, lc_val_dataloader, self.device)
+                if val_miou > best_miou:
+                    best_miou = val_miou
+                    self.patch_prediction_model.save(f"Temp/model_{epoch}_{best_miou}.pth")
+            self.train_one_epoch()
+            # self.validate(epoch)
+            # self.patch_prediction_model.save_model(epoch)
+            # self.validate(epoch)
+
+    def lc_validation(self, train_dataloader, val_dataloader, device):
+        self.patch_prediction_model.eval()
+        model = self.patch_prediction_model.feature_extractor
+        lc_module = LinearFinetuneModule(model, train_dataloader, val_dataloader, device)
+        final_miou = lc_module.linear_segmentation_validation()
+        self.logger.log({"lc_val_miou": final_miou})
+        return final_miou
 
 
 
@@ -404,18 +556,18 @@ def run(args):
     num_epochs = args.num_epochs
     masking_ratio = args.masking_ratio
     crop_size = args.crop_size
+    crop_scale = args.crop_scale_tupple
 
-    logger = wandb.init(project=project_name, group='exp_patch_correspondence', job_type='debug')
+    logger = wandb.init(project=project_name, group='exp_patch_correspondence', job_type='debug_lc')
     rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
     data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
     data_transform = video_transformations.Compose(data_transform_list)
-    video_transform_list = [video_transformations.Resize((224, 224), 'bilinear'), video_transformations.ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225])] #video_transformations.RandomResizedCrop((224, 224))
+    video_transform_list = [video_transformations.RandomResizedCrop((224, 224), scale=crop_scale), video_transformations.ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225])] #video_transformations.RandomResizedCrop((224, 224))
     video_transform = video_transformations.Compose(video_transform_list)
     num_clips = 1
-    num_workers = 8
     num_clip_frames = 4
     regular_step = 1
-    transformations_dict = {"data_transforms": None, "target_transforms": None, "shared_transforms": video_transform}
+    transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
     prefix = "/ssdstore/ssalehi/dataset"
     data_path = os.path.join(prefix, "train1/JPEGImages/")
     annotation_path = os.path.join(prefix, "train1/Annotations/")
@@ -426,7 +578,7 @@ def run(args):
     video_data_module.setup(transformations_dict)
     data_loader = video_data_module.get_data_loader()
     
-    vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vitb16')
+    vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     patch_prediction_model = PatchPredictionModel(224, vit_model, masking_ratio=masking_ratio, crop_size=crop_size, logger=logger)
     optimization_config = {
         'init_lr': 1e-4,
@@ -447,7 +599,8 @@ def run(args):
     test_dataloader = dataset.get_test_dataloader()
     patch_prediction_trainer = PatchPredictionTrainer(data_loader, test_dataloader, patch_prediction_model, num_epochs, device, logger)
     patch_prediction_trainer.setup_optimizer(optimization_config)
-    patch_prediction_trainer.train()
+    patch_prediction_trainer.train_lc(dataset.get_train_dataloader(), dataset.get_test_dataloader())
+
     # patch_prediction_trainer.visualize()
 
 
@@ -456,15 +609,16 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=str, default="cuda:2")
+    parser.add_argument('--device', type=str, default="cuda:1")
     parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=12)
     parser.add_argument('--input_size', type=int, default=224)
-    parser.add_argument('--num_epochs', type=int, default=400)
+    parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)
-    parser.add_argument('--masking_ratio', type=float, default=1)
+    parser.add_argument('--crop_scale_tupple', type=tuple, default=(0.4, 1.0))
+    parser.add_argument('--masking_ratio', type=float, default=0.5)
     args = parser.parse_args()
     run(args)
 
