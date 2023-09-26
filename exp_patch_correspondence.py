@@ -1,4 +1,5 @@
 import argparse
+from datetime import date
 import os
 from sqlite3 import Time
 import time
@@ -8,11 +9,11 @@ from pytorchvideo.data import Ucf101, make_clip_sampler
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from clustering import PerDatasetClustering
-from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule
+from data_loader import Cifar10_Handler, PascalVOCDataModule, SamplingMode, VideoDataModule
 from eval_metrics import PredsmIoU
 from evaluator import LinearFinetuneModule
 from models import CrossAttentionBlock, FeatureExtractor
-from my_utils import overlay, denormalize_video
+from my_utils import find_optimal_assignment, overlay, denormalize_video
 from pytorchvideo.transforms import (
     ApplyTransformToKey,
     Normalize,
@@ -98,25 +99,32 @@ def generate_random_crop_masks(imgs, aspect_ratio_range=(3/4, 4/3), scale_range=
     min_scale, max_scale = scale_range
 
     # Randomly select an aspect ratio and scale within the provided range
-    random_aspect_ratio = torch.rand(bs).to(imgs.device) * (max_aspect - min_aspect) + min_aspect
-    random_scale = torch.rand(bs).to(imgs.device) * (max_scale - min_scale) + min_scale
+    random_aspect_ratio = torch.rand(1).item() * (max_aspect - min_aspect) + min_aspect
+    random_scale = torch.rand(1).item() * (max_scale - min_scale) + min_scale
 
     # Compute mask dimensions based on random scale and aspect ratio
-    mask_width = (W * random_scale * random_aspect_ratio).long()
-    mask_height = (W * random_scale / random_aspect_ratio).long()
+    mask_width = int(W * random_scale * random_aspect_ratio)
+    mask_height = int(W * random_scale / random_aspect_ratio)
 
     # Check if mask dimensions exceed the image dimensions
-    if (mask_height > H).any() or (mask_width > W).any():
+    if (mask_height > H) or (mask_width > W):
         raise ValueError("Mask dimensions exceed the image dimensions.")
     
-    # Generate a random starting point
-    y = torch.randint(0, H - mask_height + 1, (bs,)).to(imgs.device)
-    x = torch.randint(0, W - mask_width + 1, (bs,)).to(imgs.device)
+
+    y_uniform = torch.rand(bs).to(imgs.device)
+    x_uniform = torch.rand(bs).to(imgs.device)
+    
+    # Scale and shift to the desired range [0, H - mask_height[i] + 1) for each i
+    y = (y_uniform * (H - mask_height + 1)).floor().long()
+    x = (x_uniform * (W - mask_width + 1)).floor().long()
+
+    x = (x // 16) * 16
+    y = (y // 16) * 16
 
     # Create the mask with all zeros and set the crop area to ones
     mask = torch.zeros((bs, H, W)).to(imgs.device)
     for i in range(bs):
-        mask[i, y[i]:y[i]+mask_height[i], x[i]:x[i]+mask_width[i]] = 1
+        mask[i, y[i]:y[i]+mask_height, x[i]:x[i]+mask_width] = 1
 
     return mask
 
@@ -146,50 +154,57 @@ class CorrespondenceDetection():
         return mask
 
     def __call__(self, features1, features2, crops):
-        bs, spatial_resolution, spatial_resolution, d_model = features1.shape
-        _, h, w = crops.shape
-        patch_size = h // spatial_resolution
-        crops = crops.reshape(bs, h // patch_size, patch_size, w // patch_size, patch_size).permute(0, 1, 3, 2, 4)
-        crops = crops.flatten(3, 4)
-        cropped_feature_mask = crops.sum(-1) > 0 ## size (bs, spatial_resolution, spatial_resolution)
-        ## find the idx of the croped features_mask
-        features1 = F.normalize(features1, dim=-1)
-        features2 = F.normalize(features2, dim=-1)
-        similarities = torch.einsum('bxyd,bkzd->bxykz', features1, features2)
-        most_similar_features_mask = torch.zeros(bs, spatial_resolution, spatial_resolution)
-        revised_crop = torch.zeros(bs, spatial_resolution, spatial_resolution)
-        self.neihbourhood = self.neihbourhood.to(features1.device)
-        similarities = similarities * self.neihbourhood.unsqueeze(0)
-        similarities = similarities.flatten(3, 4)
-        true_coords  = torch.argwhere(cropped_feature_mask[0])
-        min_coords = true_coords.min(0).values
-        max_coords = true_coords.max(0).values
-        rectangle_shape = max_coords - min_coords + 1
-        crop_h, crop_w = rectangle_shape
-        most_similar_patches = similarities.argmax(-1)
-        most_similar_cropped_patches = most_similar_patches[cropped_feature_mask]
-        most_similar_cropped_patches = most_similar_cropped_patches.reshape(bs, crop_h, crop_w)
+        with torch.no_grad():
+            bs, spatial_resolution, spatial_resolution, d_model = features1.shape
+            _, h, w = crops.shape
+            patch_size = h // spatial_resolution
+            crops = crops.reshape(bs, h // patch_size, patch_size, w // patch_size, patch_size).permute(0, 1, 3, 2, 4)
+            crops = crops.flatten(3, 4)
+            cropped_feature_mask = crops.sum(-1) > 0 ## size (bs, spatial_resolution, spatial_resolution)
+            ## find the idx of the croped features_mask
+            features1 = F.normalize(features1, dim=-1)
+            features2 = F.normalize(features2, dim=-1)
+            similarities = torch.einsum('bxyd,bkzd->bxykz', features1, features2)
+            most_similar_features_mask = torch.zeros(bs, spatial_resolution, spatial_resolution)
+            revised_crop = torch.zeros(bs, spatial_resolution, spatial_resolution)
+            self.neihbourhood = self.neihbourhood.to(features1.device)
+            similarities = similarities * self.neihbourhood.unsqueeze(0)
+            similarities = similarities.flatten(3, 4)
+            most_similar_cropped_patches_list = []
+            # for i, crp_feature_mask in enumerate(cropped_feature_mask): 
+            crp_feature_mask = cropped_feature_mask[0]
+            true_coords  = torch.argwhere(crp_feature_mask)
+            min_coords = true_coords.min(0).values
+            max_coords = true_coords.max(0).values
+            rectangle_shape = max_coords - min_coords + 1
+            crop_h, crop_w = rectangle_shape
+            most_similar_patches = similarities.argmax(-1)
+            most_similar_cropped_patches = most_similar_patches[cropped_feature_mask]
+            most_similar_cropped_patches = most_similar_cropped_patches.reshape(bs, crop_h, crop_w)
+            # most_similar_cropped_patches = F.interpolate(most_similar_cropped_patches.float().unsqueeze(0).unsqueeze(0), size=(self.output_resolution, self.output_resolution), mode='nearest').squeeze(0).squeeze(0)
+            # most_similar_cropped_patches_list.append(most_similar_cropped_patches)
 
-        # for i, similarity in enumerate(similarities):
-        #     croped_feature_idx = croped_feature_mask[i].nonzero()
-        #     for j, mask_idx in enumerate(croped_feature_idx):
-        #         # print(mask_idx)
-        #         revised_crop[i, mask_idx[0], mask_idx[1]] = 1
-        #         min_x, max_x = max(0, mask_idx[0] - self.window_size), min(spatial_resolution, mask_idx[0] + self.window_size)
-        #         min_y, max_y = max(0, mask_idx[1] - self.window_size), min(spatial_resolution, mask_idx[1] + self.window_size)
-        #         neiborhood_similarity = similarity[mask_idx[0], mask_idx[1], min_x:max_x, min_y:max_y]
-        #         max_value = neiborhood_similarity.max()
-        #         indices = (neiborhood_similarity == max_value).nonzero()[0]
-        #         label_patch_number = (indices[0] + min_x) * spatial_resolution + (indices[1] + min_y)
-        #         most_similar_features_mask[i, mask_idx[0], mask_idx[1]] = label_patch_number
-
-        revised_crop = cropped_feature_mask.float() 
-        return most_similar_cropped_patches, revised_crop
+            # for i, similarity in enumerate(similarities):
+            #     croped_feature_idx = croped_feature_mask[i].nonzero()
+            #     for j, mask_idx in enumerate(croped_feature_idx):
+            #         # print(mask_idx)
+            #         revised_crop[i, mask_idx[0], mask_idx[1]] = 1
+            #         min_x, max_x = max(0, mask_idx[0] - self.window_size), min(spatial_resolution, mask_idx[0] + self.window_size)
+            #         min_y, max_y = max(0, mask_idx[1] - self.window_size), min(spatial_resolution, mask_idx[1] + self.window_size)
+            #         neiborhood_similarity = similarity[mask_idx[0], mask_idx[1], min_x:max_x, min_y:max_y]
+            #         max_value = neiborhood_similarity.max()
+            #         indices = (neiborhood_similarity == max_value).nonzero()[0]
+            #         label_patch_number = (indices[0] + min_x) * spatial_resolution + (indices[1] + min_y)
+            #         most_similar_features_mask[i, mask_idx[0], mask_idx[1]] = label_patch_number
+            
+            # most_similar_cropped_patches = torch.stack(most_similar_cropped_patches_list)
+            revised_crop = cropped_feature_mask.float() 
+            return most_similar_cropped_patches, revised_crop
     
 
 
 class PatchPredictionModel(torch.nn.Module):
-    def __init__(self, input_size, vit_model, prediction_window_size=2, masking_ratio=0.8, crop_size=96, logger=None):
+    def __init__(self, input_size, vit_model, num_prototypes=200, prediction_window_size=2, masking_ratio=0.8, crop_size=96, logger=None):
         super(PatchPredictionModel, self).__init__()
         self.input_size = input_size
         self.eval_spatial_resolution = input_size // 16
@@ -199,6 +214,7 @@ class PatchPredictionModel(torch.nn.Module):
         self.masking_ratio = masking_ratio
         self.crop_size = crop_size
         self.logger = logger
+        self.num_prototypes = num_prototypes
         self.criterion = torch.nn.CrossEntropyLoss()
         self.key_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model, bias=False)
         self.query_head = torch.nn.Linear(self.feature_extractor.d_model, self.feature_extractor.d_model, bias=False)
@@ -208,12 +224,22 @@ class PatchPredictionModel(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(1024, 1024),
             torch.nn.GELU(),
-            torch.nn.Linear(1024, self.eval_spatial_resolution ** 2),
+            torch.nn.Linear(1024, 512),
+            torch.nn.GELU(),
+            torch.nn.Linear(512, 256),
         )
         self.lc = torch.nn.Linear(self.feature_extractor.d_model, self.eval_spatial_resolution ** 2)
         self.feature_extractor.freeze_feature_extractor(["blocks.11", "blocks.10"])
         self.cross_attention_layer = CrossAttentionBlock(input_dim=self.feature_extractor.d_model, num_heads=12, dim_feedforward=2048)
+        self.prototypes = torch.nn.Parameter(torch.randn(num_prototypes, 256))
     
+
+    def normalize_prototypes(self):
+        with torch.no_grad():
+            w = self.prototypes.data.clone()
+            w = F.normalize(w, dim=1, p=2)
+            self.prototypes.copy_(w)
+            
     def forward(self, imgs1, imgs2):
         bs, c, h, w = imgs1.shape
         img1_features, img1_attention = self.feature_extractor.forward_features(imgs1)
@@ -254,39 +280,63 @@ class PatchPredictionModel(torch.nn.Module):
 
     
     def train_step(self, imgs1, imgs2):
+        self.normalize_prototypes()
         bs = imgs1.shape[0]
         # crop = random_crop_mask(imgs1)
-        crop = generate_random_crop_masks(imgs1)
+        pred_loss = 0
+        clustering_loss = 0
         img1_features, img2_features = self.forward(imgs1, imgs2)
-        sailiancy, revised_crop = self.CorDet(img1_features, img1_features, crop)
-        revised_crop = F.interpolate(revised_crop.unsqueeze(1), size=(imgs1.size(-2), imgs1.size(-1)), mode='nearest').squeeze(1)
-        ## find the szie of revised_crop where the value is not 0
-        idxs = (revised_crop != 0).nonzero()
-        min_x, max_x = idxs[:, 1].min(), idxs[:, 1].max()
-        min_y, max_y = idxs[:, 2].min(), idxs[:, 2].max()
-        h = max_x - min_x + 1
-        w = max_y - min_y + 1
-        crop_mask = revised_crop > 0
-        ## select the cropped area and the corresponding labels 
-        cropped_area = imgs1[crop_mask.unsqueeze(1).repeat(1, 3, 1, 1)]
-        cropped_labels = sailiancy
-        cropped_area = cropped_area.reshape(bs, 3, h, w)
-        cropped_area = torch.nn.functional.interpolate(cropped_area, size=(96, 96), mode='bilinear')
-        cropped_labels = torch.nn.functional.interpolate(cropped_labels.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
-        # cropped_labels = torch.arange(0, 196).reshape(14, 14).unsqueeze(0).repeat(bs, 1, 1)
-        cropped_labels = cropped_labels.long().to(imgs1.device)
-        masked_features2 = self.mask_features(img1_features.flatten(1, 2), self.masking_ratio)
-        cropped_area_features, _ = self.feature_extractor.forward_features(cropped_area) ## size (bs, 36, d_model)
-        cross_attented_features = self.cross_attention(self.query_head(cropped_area_features), self.key_head(masked_features2), self.value_head(masked_features2)) ## size (bs, 36, d_model)
-        cross_attented_features = cross_attented_features.reshape(bs, 6, 6, cross_attented_features.size(-1)).permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
-        resized_cross_attented_features = torch.nn.functional.interpolate(cross_attented_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
-        predictions = self.lc(resized_cross_attented_features) ## size (bs, 36, 196)
-        predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
-        # predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
-        # predictions = cross_attented_features
-        # predictions = torch.nn.functional.interpolate(predictions, size=(96, 96), mode='bilinear')
-        loss = self.criterion(predictions, cropped_labels)
-        return loss
+        for i in range(4):
+            crop = generate_random_crop_masks(imgs1)
+            sailiancy, revised_crop = self.CorDet(img1_features, img2_features, crop)
+            revised_crop = F.interpolate(revised_crop.unsqueeze(1), size=(imgs1.size(-2), imgs1.size(-1)), mode='nearest').squeeze(1)
+            ## find the szie of revised_crop where the value is not 0
+            idxs = (revised_crop[0] != 0).nonzero()
+            min_x, max_x = idxs[:, 0].min(), idxs[:, 0].max()
+            min_y, max_y = idxs[:, 1].min(), idxs[:, 1].max()
+            h = max_x - min_x + 1
+            w = max_y - min_y + 1
+            crop_mask = revised_crop > 0
+            ## select the cropped area and the corresponding labels 
+            cropped_area = imgs1[crop_mask.unsqueeze(1).repeat(1, 3, 1, 1)]
+            cropped_labels = sailiancy
+            cropped_area = cropped_area.reshape(bs, 3, h, w)
+            cropped_area = torch.nn.functional.interpolate(cropped_area, size=(96, 96), mode='bilinear')
+            cropped_labels = torch.nn.functional.interpolate(cropped_labels.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
+            # cropped_labels = torch.arange(0, 196).reshape(14, 14).unsqueeze(0).repeat(bs, 1, 1)
+            cropped_labels = cropped_labels.long().to(imgs1.device)
+            masked_features2 = self.mask_features(img2_features.flatten(1, 2), self.masking_ratio)
+            cropped_area_features, _ = self.feature_extractor.forward_features(cropped_area) ## size (bs, 36, d_model)
+            cross_attented_features = self.cross_attention(self.query_head(cropped_area_features), self.key_head(masked_features2), self.value_head(masked_features2)) ## size (bs, 36, d_model)
+            cross_attented_features = cross_attented_features.reshape(bs, 6, 6, cross_attented_features.size(-1)).permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+            resized_cross_attented_features = torch.nn.functional.interpolate(cross_attented_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
+            predictions = self.lc(resized_cross_attented_features) ## size (bs, 36, 196)
+            predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+
+
+            cropped_area_features = self.mlp_head(cropped_area_features)
+            cropped_area_features = cropped_area_features.reshape(bs, 6, 6, -1).permute(0, 3, 1, 2)
+            cropped_area_features = F.interpolate(cropped_area_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
+            cropped_area_features = cropped_area_features.flatten(0, 2)
+            normalized_crop_features = F.normalize(cropped_area_features, dim=-1)
+            crop_scores = torch.einsum('bd,nd->bn', normalized_crop_features , self.prototypes)
+            crop_scores = crop_scores.reshape(bs, 96, 96, self.num_prototypes).permute(0, 3, 1, 2)
+            ## replace numbers in cropped_labels with the corresponding prototype idx in q
+
+            projected_img2_features = self.mlp_head(img2_features)
+            projected_img2_features = F.normalize(projected_img2_features, dim=-1)
+            scores = torch.einsum('bd,nd->bn', projected_img2_features.flatten(0, -2), self.prototypes)
+            q = find_optimal_assignment(scores, 0.05, 3)
+            q = q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2)
+            q = q.argmax(1)
+            cropped_q_gt = q.flatten(1, 2)[torch.arange(q.size(0)).unsqueeze(1), sailiancy.flatten(1, 2)].reshape(bs, sailiancy.size(-2), sailiancy.size(-1))
+            resized_crop_gt = F.interpolate(cropped_q_gt.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
+            # predictions = predictions.permute(0, 3, 1, 2) ## size (bs, 196, 6, 6)
+            # predictions = cross_attented_features
+            # predictions = torch.nn.functional.interpolate(predictions, size=(96, 96), mode='bilinear')
+            pred_loss += self.criterion(predictions, cropped_labels)
+            clustering_loss += self.criterion(crop_scores / 0.1, resized_crop_gt.long())
+        return pred_loss / 4, clustering_loss / 4
     
 
     def get_optimization_params(self):
@@ -296,6 +346,8 @@ class PatchPredictionModel(torch.nn.Module):
             {"params": self.query_head.parameters(), "lr": 1e-4},
             {"params": self.value_head.parameters(), "lr": 1e-4},
             {"params": self.lc.parameters(), "lr": 1e-4},
+            {"params": self.prototypes, "lr": 1e-4},
+            {"params": self.mlp_head.parameters(), "lr": 1e-4},
             {"params": self.cross_attention_layer.parameters(), "lr": 1e-4},
         ]
 
@@ -391,10 +443,6 @@ class PatchPredictionModel(torch.nn.Module):
 
         
 
-
-
-
-
 class PatchPredictionTrainer():
     def __init__(self, dataloader, test_dataloader, patch_prediction_model, num_epochs, device, logger):
         self.dataloader = dataloader
@@ -445,19 +493,24 @@ class PatchPredictionTrainer():
             annotations = annotations.squeeze(1)
             datum = datum.squeeze(1)
             imgs1, imgs2 = datum[:, 0], datum[:, 1]
+            # imgs1, imgs2 = datum, datum
             imgs1, imgs2 = imgs1.to(self.device), imgs2.to(self.device)
-            loss = self.patch_prediction_model.train_step(imgs1, imgs2)
+            loss, clustering_loss = self.patch_prediction_model.train_step(imgs1, imgs2)
+            total_loss = 0 * loss + clustering_loss
             self.optimizer.zero_grad()
-            loss.backward()
+            total_loss.backward()
             self.optimizer.step()
             self.optimizer.update_lr()
-            epoch_loss += loss.item()
-            print("Iteration: {} Loss: {}".format(i, loss.item()))
+            epoch_loss += total_loss.item()
+            print("Iteration: {} Loss: {}".format(i, total_loss.item()))
             self.logger.log({"loss": loss.item()})
+            self.logger.log({"clustering_loss": clustering_loss.item()})
             lr = self.optimizer.get_lr()
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
         epoch_loss /= (i + 1)
+        if epoch_loss < 2.5:
+            self.patch_prediction_model.save(f"Temp/model_{epoch_loss}.pth")
         print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
@@ -465,7 +518,7 @@ class PatchPredictionTrainer():
             print("Epoch: {}".format(epoch))
             self.train_one_epoch()
             if epoch % 4 == 0:
-                self.validate1(epoch)
+                self.validate(epoch)
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
             # self.validate(epoch)
@@ -525,7 +578,7 @@ class PatchPredictionTrainer():
         best_miou = 0
         for epoch in range(self.num_epochs):
             print("Epoch: {}".format(epoch))
-            if epoch % 60 == 0:
+            if epoch % 60 == 64:
                 val_miou = self.lc_validation(lc_train_dataloader, lc_val_dataloader, self.device)
                 if val_miou > best_miou:
                     best_miou = val_miou
@@ -558,14 +611,18 @@ def run(args):
     crop_size = args.crop_size
     crop_scale = args.crop_scale_tupple
 
-    logger = wandb.init(project=project_name, group='exp_patch_correspondence', job_type='debug_lc')
+    config = vars(args)
+    ## make a string of today's date
+    today = date.today()
+    d1 = today.strftime("%d_%m_%Y")
+    logger = wandb.init(project=project_name, group=d1, job_type='debug_clustering_ytvos', config=config)
     rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
     data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
     data_transform = video_transformations.Compose(data_transform_list)
     video_transform_list = [video_transformations.RandomResizedCrop((224, 224), scale=crop_scale), video_transformations.ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225])] #video_transformations.RandomResizedCrop((224, 224))
     video_transform = video_transformations.Compose(video_transform_list)
     num_clips = 1
-    num_clip_frames = 4
+    num_clip_frames = 2
     regular_step = 1
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
     prefix = "/ssdstore/ssalehi/dataset"
@@ -577,7 +634,7 @@ def run(args):
     video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
     data_loader = video_data_module.get_data_loader()
-    
+
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     patch_prediction_model = PatchPredictionModel(224, vit_model, masking_ratio=masking_ratio, crop_size=crop_size, logger=logger)
     optimization_config = {
@@ -599,7 +656,7 @@ def run(args):
     test_dataloader = dataset.get_test_dataloader()
     patch_prediction_trainer = PatchPredictionTrainer(data_loader, test_dataloader, patch_prediction_model, num_epochs, device, logger)
     patch_prediction_trainer.setup_optimizer(optimization_config)
-    patch_prediction_trainer.train_lc(dataset.get_train_dataloader(), dataset.get_test_dataloader())
+    patch_prediction_trainer.train()
 
     # patch_prediction_trainer.visualize()
 
@@ -609,7 +666,7 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=str, default="cuda:1")
+    parser.add_argument('--device', type=str, default="cuda:3")
     parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)
@@ -617,8 +674,10 @@ if __name__ == "__main__":
     parser.add_argument('--input_size', type=int, default=224)
     parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)
-    parser.add_argument('--crop_scale_tupple', type=tuple, default=(0.4, 1.0))
-    parser.add_argument('--masking_ratio', type=float, default=0.5)
+    parser.add_argument('--crop_scale_tupple', type=tuple, default=(0.3, 1))
+    parser.add_argument('--masking_ratio', type=float, default=1)
+    parser.add_argument('--same_frame_query_ref', type=bool, default=False)
+    parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
     args = parser.parse_args()
     run(args)
 

@@ -17,7 +17,7 @@ from torch.optim.lr_scheduler import StepLR
 
 project_name = "DINO_MAE"
 
-class PredsmIoU(Metric):
+class PredsmIoU:
     """
     Subclasses Metric. Computes mean Intersection over Union (mIoU) given ground-truth and predictions.
     .update() can be called repeatedly to add data from multiple validation loops.
@@ -29,11 +29,10 @@ class PredsmIoU(Metric):
         :param num_pred_classes: The number of predicted classes.
         :param num_gt_classes: The number of gt classes.
         """
-        super().__init__(dist_sync_on_step=False)
         self.num_pred_classes = num_pred_classes
         self.num_gt_classes = num_gt_classes
-        self.add_state("gt", [])
-        self.add_state("pred", [])
+        self.gt = []
+        self.pred = []
         self.n_jobs = -1
 
     def update(self, gt: torch.Tensor, pred: torch.Tensor) -> None:

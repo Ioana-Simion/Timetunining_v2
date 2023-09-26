@@ -19,8 +19,17 @@ import random
 import json
 from enum import Enum
 from my_utils import denormalize_video, make_seg_maps
+from torch.utils.data.distributed import DistributedSampler as DistributedSampler
 
 import video_transformations
+
+
+import torch
+import torchvision as tv
+from abc import ABC, abstractmethod
+import os
+import scipy.io as sio
+from torchvision.datasets import CIFAR10
 
 
 project_name = "TimeTuning_v2"
@@ -36,6 +45,119 @@ random.seed(1)
 np.random.seed(1)
 torch.manual_seed(1)
 torch.cuda.manual_seed(1)
+
+
+
+
+
+class Dataset(torch.nn.Module):
+    @abstractmethod
+    def get_train_loader(self):
+        pass
+
+    @abstractmethod
+    def get_test_loader(self):
+        pass
+
+    @abstractmethod
+    def get_val_loader(self):
+        pass
+
+    @abstractmethod
+    def get_train_dataset(self):
+        pass
+
+    @abstractmethod
+    def get_test_dataset(self):
+        pass
+
+    @abstractmethod
+    def get_val_dataset(self):
+        pass
+    
+    @abstractmethod
+    def get_num_classes(self):
+        pass
+
+    @abstractmethod
+    def get_dataset_name(self):
+        pass
+
+
+class NormalSubsetDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, subset_indices):
+        self.dataset = dataset
+        self.subset_indices = subset_indices
+
+    def __getitem__(self, index):
+        return self.dataset[self.subset_indices[index]]
+
+    def __len__(self):
+        return len(self.subset_indices)
+
+
+class Cifar10_Handler(Dataset):
+    def __init__(self, batch_size, normal_classes, transformations, val_transformations, num_workers, device=None):
+        self.batch_size = batch_size
+        self.normal_classes = normal_classes
+        self.num_workers = num_workers
+        self.device = device
+        self.dataset_name = "Cifar10"
+        self.num_classes = 10
+        self.transform = transformations
+        self.val_transform = val_transformations
+        self.train_dataset = CIFAR10(root="/ssdstore/ssalehi/cifar", train=True, download=True, transform=self.transform)
+        self.test_dataset = CIFAR10(root="/ssdstore/ssalehi/cifar", train=False, download=True, transform=self.val_transform )
+        self.binarize_test_labels()
+        ## split the dataset to train and validation
+        normal_subset_indices, normal_subset = self.get_normal_sebset_indices()
+        self.normal_dataset = NormalSubsetDataset(self.train_dataset, normal_subset_indices)
+        print("Normal Subset Size: ", len(self.normal_dataset))
+        self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.normal_dataset, [int(len(self.normal_dataset)*0.8), int(len(self.normal_dataset)*0.2)])
+        self.train_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        self.test_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        self.val_loader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+
+    def get_train_loader(self):
+        return self.train_loader
+
+    def get_test_loader(self):
+        return self.test_loader
+
+    def get_val_loader(self):
+        return self.val_loader
+
+    def get_train_dataset(self):
+        return self.train_dataset
+
+    def get_test_dataset(self):
+        return self.test_dataset
+
+    def get_val_dataset(self):
+        return self.val_dataset
+
+    def get_num_classes(self):
+        return self.num_classes
+
+    def get_dataset_name(self):
+        return self.dataset_name
+    
+    def get_normal_classes(self):
+        return self.normal_classes
+
+    def get_normal_sebset_indices(self):
+        normal_subset_indices = [i for i, (data, label) in enumerate(self.train_dataset) if label in self.normal_classes]
+        normal_subset = torch.utils.data.Subset(self.train_dataset, normal_subset_indices)
+        return normal_subset_indices, normal_subset
+    
+    def binarize_test_labels(self):
+        for i, label in enumerate(self.test_dataset.targets):
+            if label in self.normal_classes:
+                self.test_dataset.targets[i] = 0
+            else:
+                self.test_dataset.targets[i] = 1
+   
+    
 
 
 
@@ -63,7 +185,7 @@ def get_file_path(classes_directory):
 
 def make_categories_dict(meta_dict, name):
     category_list = []
-    if name == "ytvos":
+    if "ytvos" in name:
         video_name_list = meta_dict["videos"].keys()
         for name in video_name_list:
             obj_list = meta_dict["videos"][name]["objects"].keys()
@@ -225,6 +347,44 @@ class VideoDataset(torch.utils.data.Dataset):
             sampled_annotations = torch.empty(0)
         ## squeezing the annotations to be in the shape of (num_sample, num_clips, num_frames, height, width)
         return sampled_data, sampled_annotations
+
+
+    def read_batch_with_new_transforms(self, path, annotation_path=None, frame_transformation=None, target_transformation=None, video_transformation=None):
+        size = self.train_dict_lenghts[path]
+        # sampling_num = size if self.num_frames > size else self.num_frames
+        clip_indices = self.generate_indices(self.train_dict_lenghts[path], self.num_frames)
+        sampled_clips = self.read_clips(path, clip_indices)
+        annotations = []
+        sampled_clip_annotations = []
+        labels_dict = {}
+        if annotation_path is not None:
+            sampled_clip_annotations = self.read_clips(annotation_path, clip_indices)
+            if target_transformation is not None:
+                for i in range(len(sampled_clip_annotations)):
+                    sampled_clip_annotations[i] = target_transformation(sampled_clip_annotations[i])
+        if frame_transformation is not None:
+            for i in range(len(sampled_clips)):
+                # try:
+                multi_crops, labels_dict = frame_transformation(sampled_clips[i])
+                # except:
+                #     print("Error in frame transformation")
+        if video_transformation is not None:
+            for i in range(len(sampled_clips)):
+                if len(sampled_clip_annotations) != 0:
+                    sampled_clips[i], sampled_clip_annotations[i] = video_transformation(sampled_clips[i], sampled_clip_annotations[i])
+                else:
+                    sampled_clips[i] = video_transformation(sampled_clips[i])
+        # sampled_data = torch.stack(sampled_clips)
+        if len(sampled_clip_annotations) != 0:
+            sampled_annotations = torch.stack(sampled_clip_annotations)
+            if sampled_annotations.size(0) != 0:
+                sampled_annotations = (255 * sampled_annotations).type(torch.uint8) 
+                if sampled_annotations.shape[2] == 1:
+                    sampled_annotations = sampled_annotations.squeeze(2)
+        else:
+            sampled_annotations = torch.empty(0)
+        ## squeezing the annotations to be in the shape of (num_sample, num_clips, num_frames, height, width)
+        return multi_crops, labels_dict, sampled_annotations
     
 
     def __getitem__(self, idx): ### (B, num_clips, num_frames, C, H, W) returns None if the annotation flag is off. Be careful when loading the data.
@@ -272,6 +432,30 @@ class YVOSDataset(VideoDataset):
 
 
 
+class TimeTYVOSDataset(VideoDataset):
+
+    def __init__(self, classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform=None, target_transform=None, video_transform=None, meta_file_directory=None, regular_step=1) -> None:
+        super().__init__(classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform, target_transform, video_transform, meta_file_directory, regular_step=regular_step)
+        
+        self.category_dict = make_categories_dict(self.meta_dict, "timetytvos")
+
+    def __getitem__(self, idx): ### (B, num_clips, num_frames, C, H, W) returns None if the annotation flag is off. Be careful when loading the data.
+        video_path = self.keys[idx]
+        dir_name = video_path.split("/")[-1]
+        annotations = None
+        annotations_path = None
+        if (self.use_annotations):
+            annotations_path = self.annotation_keys[idx]
+            # annotations = self.read_annotations(annotations_path, self.target_transform, indices=indices)
+        data, labels, annotations = self.read_batch_with_new_transforms(video_path, annotations_path, self.frame_transform, self.target_transform ,self.video_transform)   
+        if self.meta_dict is not None:
+            annotations = map_instances(annotations, self.meta_dict["videos"][dir_name]["objects"], self.category_dict)
+
+        # else:
+            # annotations = convert_to_indexed_RGB(annotations)
+        return data, labels, annotations
+
+
 class Kinetics(VideoDataset):
 
     def __init__(self, classes_directory, sampling_mode, num_clips, num_frames, frame_transform=None, target_transform=None, video_transform=None, meta_file_directory=None, regular_step=1) -> None:
@@ -282,7 +466,7 @@ class Kinetics(VideoDataset):
         dir_name = video_path.split("/")[-1]
         annotations = None
         annotations_path = None
-        data, annotations = self.read_batch(video_path, None, self.frame_transform, self.target_transform ,self.video_transform)   
+        data, annotations = self.read_batch_with_new_transforms(video_path, None, self.frame_transform, self.target_transform ,self.video_transform)   
         if self.meta_dict is not None:
             annotations = map_instances(annotations, self.meta_dict["videos"][dir_name]["objects"], self.category_dict)
 
@@ -424,7 +608,7 @@ class PascalVOCDataModule():
 
 class VideoDataModule():
 
-    def __init__(self, name, path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers=0):
+    def __init__(self, name, path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers=0, world_size=1, rank=0):
         super().__init__()
         self.name = name
         self.path_dict = path_dict
@@ -437,12 +621,19 @@ class VideoDataModule():
         self.sampling_mode = sampling_mode
         self.regular_step = regular_step
         self.num_clips = num_clips
+        self.world_size = world_size
+        self.rank = rank
+        self.sampler = None
+        self.data_loader = None
+
     
     def setup(self, transforms_dict):
         data_transforms = transforms_dict["data_transforms"]
         target_transforms = transforms_dict["target_transforms"]
         shared_transforms = transforms_dict["shared_transforms"]
-        if self.name == "ytvos":
+        if self.name == "timetytvos":
+            self.dataset = TimeTYVOSDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
+        elif self.name == "ytvos":
             self.dataset = YVOSDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         elif self.name == "kinetics":
             self.dataset = Kinetics(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
@@ -450,8 +641,15 @@ class VideoDataModule():
             self.dataset = VideoDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         print(f"Dataset size : {len(self.dataset)}")
     
-    def get_data_loader(self, shuffle=True):
-        return DataLoader(self.dataset, batch_size=self.batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=True)
+    def make_data_loader(self, shuffle=True):
+        if self.world_size > 1:
+            self.sampler = DistributedSampler(self.dataset, num_replicas=self.world_size, rank=self.rank, shuffle=shuffle)
+            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, sampler=self.sampler)
+        else:
+            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=True)
+    
+    def get_data_loader(self):
+        return self.data_loader
     
 
     
@@ -515,21 +713,22 @@ def test_video_data_module(logger):
     rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
     data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
     data_transform = video_transformations.Compose(data_transform_list)
-    video_transform_list = [video_transformations.Resize(224, 'bilinear'), video_transformations.RandomResizedCrop((224, 224)), video_transformations.ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225])]
-    video_transform = video_transformations.Compose(video_transform_list)
+    video_transform_list = [video_transformations.ClipToTensor()]
+    target_transform = video_transformations.Compose(video_transform_list)
+    video_transform = video_transformations.TimeTTransform([224, 96], [1, 4], [0.25, 0.05], [1., 0.25], 1, 0.01, 1)
     num_clips = 1
     batch_size = 8
     num_workers = 4
     num_clip_frames = 4
     regular_step = 1
-    transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
+    transformations_dict = {"data_transforms": video_transform, "target_transforms": target_transform, "shared_transforms": None}
     prefix = "/ssdstore/ssalehi/dataset"
     data_path = os.path.join(prefix, "train1/JPEGImages/")
     annotation_path = os.path.join(prefix, "train1/Annotations/")
     meta_file_path = os.path.join(prefix, "train1/meta.json")
     path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
     sampling_mode = SamplingMode.DENSE
-    video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    video_data_module = VideoDataModule("timetytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
     data_loader = video_data_module.get_data_loader()
     logging_directory = "data_loader_log/"
@@ -539,7 +738,7 @@ def test_video_data_module(logger):
     os.makedirs(logging_directory)
 
     for i, train_data in enumerate(data_loader):
-        datum, annotations = train_data
+        datum, labels, annotations = train_data
         print("===========================")
         print("")
         annotations = annotations.squeeze(1)

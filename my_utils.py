@@ -22,6 +22,7 @@ from PIL import Image
 import matplotlib
 import numpy as np
 import wandb
+from torch import distributed as dist
 
 
 def show_trainable_paramters(model):
@@ -90,11 +91,10 @@ def preprocess(imgs):
 
 
 
-def cosine_scheduler(base_value: float, final_value: float, epochs: int, niter_per_ep: int):
+def cosine_scheduler(base_value: float, final_value: float, max_iters: int):
     # Construct cosine schedule starting at base_value and ending at final_value with epochs * niter_per_ep values.
-    iters = np.arange(epochs * niter_per_ep)
+    iters = np.arange(max_iters)
     schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
-    assert len(schedule) == epochs * niter_per_ep
     return schedule
 
 
@@ -109,10 +109,9 @@ def denormalize_video(video):
 
 def overlay_video_cmap(cluster_maps, denormalized_video):
     """
-    cluster_maps: [1, nf, h, w]
-    denormalized_video: [1, nf, c, h, w]
+    cluster_maps: [nf, h, w]
+    denormalized_video: [nf, c, h, w]
     """
-    cluster_maps = cluster_maps.squeeze(0)
         ## convert cluster_maps to [num_maps, h, w]
     masks = []
     cluster_ids = torch.unique(cluster_maps)
@@ -128,42 +127,11 @@ def overlay_video_cmap(cluster_maps, denormalized_video):
     cluster_maps = torch.stack(masks)
             
     overlayed = [
-                draw_segmentation_masks(img, masks=mask, alpha=0.7)
+                draw_segmentation_masks(img, masks=mask, alpha=0.5)
                 for img, mask in zip(denormalized_video, cluster_maps)
             ]
     overlayed = torch.stack(overlayed)
     return cluster_maps,overlayed
-
-
-def overlay(image, mask, color = (255, 0, 0), alpha = 0.5, resize=None):
-    """Combines image and its segmentation mask into a single image.
-    https://www.kaggle.com/code/purplejester/showing-samples-with-segmentation-mask-overlay
-
-    Params:
-        image: Training image. np.ndarray,
-        mask: Segmentation mask. np.ndarray,
-        color: Color for segmentation mask rendering.  tuple[int, int, int] = (255, 0, 0)
-        alpha: Segmentation mask's transparency. float = 0.5,
-        resize: If provided, both image and its mask are resized before blending them together.
-        tuple[int, int] = (1024, 1024))
-
-    Returns:
-        image_combined: The combined image. np.ndarray
-
-    """
-    color = color[::-1]
-    colored_mask = np.expand_dims(mask, 0).repeat(3, axis=0)
-    colored_mask = np.moveaxis(colored_mask, 0, -1)
-    masked = np.ma.MaskedArray(image, mask=colored_mask, fill_value=color)
-    image_overlay = masked.filled()
-
-    if resize is not None:
-        image = cv2.resize(image.transpose(1, 2, 0), resize)
-        image_overlay = cv2.resize(image_overlay.transpose(1, 2, 0), resize)
-
-    image_combined = cv2.addWeighted(image, 1 - alpha, image_overlay, alpha, 0)
-
-    return image_combined
 
 
 def make_seg_maps(data, cluster_map, logging_directory, name, w_featmap=28, h_featmap=28):
@@ -211,3 +179,48 @@ def convert_list_to_video(frames_list, name, speed, directory="", wdb_log=False)
     frames_list[0].save(f"{directory}{name}.gif", save_all=True, append_images=frames_list[1:], duration=speed, loop=0)
     if wdb_log:
         wandb.log({name: wandb.Video(f"{directory}{name}.gif", fps=4, format="gif")})
+
+
+@torch.no_grad()
+def sinkhorn(Q: torch.Tensor, nmb_iters: int, world_size=1) -> torch.Tensor:
+    with torch.no_grad():
+        Q = Q.detach().clone()
+        sum_Q = torch.sum(Q)
+        if world_size > 1:
+            dist.all_reduce(sum_Q)
+        Q /= sum_Q
+        K, B = Q.shape
+        u = torch.zeros(K).to(Q.device)
+        r = torch.ones(K).to(Q.device) / K
+        c = torch.ones(B).to(Q.device) / B * world_size
+
+        if world_size > 1:
+            curr_sum = torch.sum(Q, dim=1)
+            dist.all_reduce(curr_sum)
+
+        for _ in range(nmb_iters):
+            if world_size > 1:
+                u = curr_sum
+            else:
+                u = torch.sum(Q, dim=1)
+            Q *= (r / u).unsqueeze(1)
+            Q *= (c / torch.sum(Q, dim=0)).unsqueeze(0)
+            if world_size > 1:
+                curr_sum = torch.sum(Q, dim=1)
+                dist.all_reduce(curr_sum)
+
+        return (Q / torch.sum(Q, dim=0, keepdim=True)).t().float()
+
+
+def find_optimal_assignment(scores, epsilon, sinkhorn_iterations, world_size=1):
+    """
+    Computes the Sinkhorn matrix Q.
+    :param scores: similarity matrix
+    :return: Sinkhorn matrix Q
+    """
+    with torch.no_grad():
+        q = torch.exp(scores / epsilon).t()
+        q = sinkhorn(q, sinkhorn_iterations, world_size=world_size)
+        # q = torch.softmax(scores / epsilon, dim=0)
+        # q = q / q.sum(dim=1, keepdim=True)
+    return q

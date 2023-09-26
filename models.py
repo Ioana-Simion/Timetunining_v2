@@ -203,14 +203,19 @@ class FeatureExtractor(torch.nn.Module):
         return feats, normalized_cls_attention
     
     def forward_features(self, imgs):
-        features = self.model.get_intermediate_layers(imgs)[0]
-        features = features[:, 1:]
-        normalized_cls_attention = self.model.get_last_selfattention(imgs)
+        try:
+            ## for the backbones that does not support the function
+            features = self.model.get_intermediate_layers(imgs)[0]
+            features = features[:, 1:]
+            normalized_cls_attention = self.model.get_last_selfattention(imgs)
+        except:
+            features = self.model.forward_features(imgs)[:, 1:]
+            normalized_cls_attention = None
         return features, normalized_cls_attention
 
 
 
-class FeatureForwarder(torch.nn.Module):
+class FeatureForwarder():
     def __init__(self, spatial_resolution, context_frames, context_window, topk, feature_head=None):
         super().__init__()
         self.spatial_resolution = spatial_resolution
@@ -239,34 +244,35 @@ class FeatureForwarder(torch.nn.Module):
     
 
     def forward(self, feature_list, first_segmentation_map):
-        down_sampled_first_seg = nn.functional.interpolate(first_segmentation_map.type(torch.DoubleTensor).unsqueeze(0), size=(self.spatial_resolution, self.spatial_resolution), mode="nearest")
-        first_seg = down_sampled_first_seg
-        # The queue stores the n preceeding frames
-        que = queue.Queue(self.context_frames)
-        frame1_feat = feature_list[0]
-        frame1_feat = frame1_feat.squeeze()
-        frame1_feat = frame1_feat.T
-        
-        segmentation_list = []
-        for cnt in tqdm(range(1, feature_list.size(0))):
-            feature_tar = feature_list[cnt]
+        with torch.no_grad():
+            down_sampled_first_seg = nn.functional.interpolate(first_segmentation_map.type(torch.DoubleTensor).unsqueeze(0), size=(self.spatial_resolution, self.spatial_resolution), mode="nearest")
+            first_seg = down_sampled_first_seg
+            # The queue stores the n preceeding frames
+            que = queue.Queue(self.context_frames)
+            frame1_feat = feature_list[0]
+            frame1_feat = frame1_feat.squeeze()
+            frame1_feat = frame1_feat.T
+            
+            segmentation_list = []
+            for cnt in tqdm(range(1, feature_list.size(0))):
+                feature_tar = feature_list[cnt]
 
-            # we use the first segmentation and the n previous ones
-            used_frame_feats = [frame1_feat] + [pair[0] for pair in list(que.queue)]
-            used_segs = [first_seg] + [pair[1] for pair in list(que.queue)]
+                # we use the first segmentation and the n previous ones
+                used_frame_feats = [frame1_feat] + [pair[0] for pair in list(que.queue)]
+                used_segs = [first_seg] + [pair[1] for pair in list(que.queue)]
 
-            frame_tar_avg, feat_tar = self.label_propagation(feature_tar, used_frame_feats, used_segs)
+                frame_tar_avg, feat_tar = self.label_propagation(feature_tar, used_frame_feats, used_segs)
 
-            # pop out oldest frame if neccessary
-            if que.qsize() == self.context_frames:
-                que.get()
-            # push current results into queue
-            # seg = copy.deepcopy(frame_tar_avg.detach())
-            seg = frame_tar_avg
-            que.put([feat_tar, seg])
-            # segmentation_list.append(norm_mask(frame_tar_avg.squeeze(0)))
-            segmentation_list.append(frame_tar_avg.squeeze(0))
-        return segmentation_list  
+                # pop out oldest frame if neccessary
+                if que.qsize() == self.context_frames:
+                    que.get()
+                # push current results into queue
+                # seg = copy.deepcopy(frame_tar_avg.detach())
+                seg = frame_tar_avg
+                que.put([feat_tar, seg])
+                # segmentation_list.append(norm_mask(frame_tar_avg.squeeze(0)))
+                segmentation_list.append(frame_tar_avg.squeeze(0))
+            return segmentation_list  
 
 
 
@@ -288,7 +294,7 @@ class FeatureForwarder(torch.nn.Module):
         feat_tar = feat_tar.unsqueeze(0).repeat(ncontext, 1, 1)
         aff = torch.exp(torch.bmm(feat_tar, feat_sources) / 0.1) # nmb_context x h*w (tar: query) x h*w (source: keys)
         aff = aff.to(feat_tar.device)
-        if self.context_frames > 0:
+        if self.context_window > 0:
             if self.mask_neighborhood is None:
                 self.mask_neighborhood = self.restrict_neighborhood(h, w, self.context_window)
                 self.mask_neighborhood = self.mask_neighborhood.unsqueeze(0).repeat(ncontext, 1, 1)
@@ -360,6 +366,23 @@ class CrossAttentionBlock(nn.Module):
 
         return x
 
+
+
+class DistributedDataParallelModel(nn.Module):
+    def __init__(self, model, gpu):
+        super(DistributedDataParallelModel, self).__init__()
+        self.model = nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+
+    def forward(self, *input):
+        return self.model(*input)
+    def get_non_ddp_model(self):
+        return self.model.module
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model.module, name)
+        
 if __name__ == "__main__":
 
     img = torch.randn(1, 3, 224, 224)

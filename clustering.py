@@ -67,7 +67,6 @@ class PerClipClustering(Clustering):
 class PerDatasetClustering(Clustering):
 
     def cluster(self, features):
-        cluster_maps = torch.zeros_like(features)
         bs, nf, np, d = features.shape
         x = features.cpu()
         x = x.reshape(bs*nf*np, d)

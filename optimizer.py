@@ -119,3 +119,69 @@ class DINO_VQVAE_Optimizer:
     
     def get_weight_decay(self, param_group=0):
         return self.optimizer.param_groups[param_group]['weight_decay']
+
+
+
+class TimeTv2Optimizer:
+    def __init__(self, model_parameters_dict, init_lr, peak_lr, warmup_steps, grad_norm_clipping, max_iter):
+        self.model_parameters_dict = model_parameters_dict
+        self.init_lr = init_lr
+        self.peak_lr = peak_lr
+        self.warmup_steps = warmup_steps
+        self.grad_norm_clipping = grad_norm_clipping
+        self.weight_decay_values = cosine_scheduler(0.04, 0.4, max_iter)
+        self.max_iter = max_iter
+        
+        self.optimizer = None
+        self.scheduler = None
+        self.current_step = 0
+    
+    def setup_optimizer(self, optimizer_type='AdamW'):
+        init_weight_decay = self.weight_decay_values[0]
+        if optimizer_type == 'AdamW':
+            self.optimizer = AdamW(self.model_parameters_dict, weight_decay=init_weight_decay)
+        elif optimizer_type == 'SGD':
+            self.optimizer = SGD(self.model_parameters_dict, weight_decay=init_weight_decay)
+        else:
+            raise ValueError("Unsupported optimizer type. Choose 'Adam' or 'SGD'.")
+    
+    def setup_scheduler(self):
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.max_iter, eta_min=0)
+    
+    def step(self):
+        self.optimizer.step()
+        if self.grad_norm_clipping:
+            parameters = []
+            for param_dict in self.model_parameters_dict:
+                parameters += param_dict['params']
+            torch.nn.utils.clip_grad_norm_(parameters, self.grad_norm_clipping)
+        self.current_step += 1
+        if self.current_step < self.warmup_steps:
+            self.warmup_lr()
+        else:
+            self.update_lr()
+        self.adjust_weight_decay()
+    
+    def warmup_lr(self):
+        if self.current_step < self.warmup_steps:
+            warmup_factor = self.current_step / self.warmup_steps
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.init_lr +  warmup_factor * (self.peak_lr - self.init_lr)
+    
+    def adjust_weight_decay(self):
+        for i, param_group in enumerate(self.optimizer.param_groups):
+            if param_group["weight_decay"] != 0:
+                param_group["weight_decay"] = self.weight_decay_values[self.current_step]
+    
+    def update_lr(self):
+        if self.scheduler is not None:
+            self.scheduler.step()
+    
+    def zero_grad(self):
+        self.optimizer.zero_grad()
+    
+    def get_lr(self):
+        return self.optimizer.param_groups[0]['lr']
+    
+    def get_weight_decay(self):
+        return self.optimizer.param_groups[0]['weight_decay']
