@@ -18,7 +18,7 @@ from image_transformations import RandomResizedCrop, RandomHorizontalFlip, Compo
 import random
 import json
 from enum import Enum
-from my_utils import denormalize_video, make_seg_maps
+from my_utils import denormalize_video, make_seg_maps, visualize_sampled_videos
 from torch.utils.data.distributed import DistributedSampler as DistributedSampler
 
 import video_transformations
@@ -411,8 +411,8 @@ class YVOSDataset(VideoDataset):
 
     def __init__(self, classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform=None, target_transform=None, video_transform=None, meta_file_directory=None, regular_step=1) -> None:
         super().__init__(classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform, target_transform, video_transform, meta_file_directory, regular_step=regular_step)
-        
-        self.category_dict = make_categories_dict(self.meta_dict, "ytvos")
+        if self.meta_dict is not None:
+            self.category_dict = make_categories_dict(self.meta_dict, "ytvos")
 
     def __getitem__(self, idx): ### (B, num_clips, num_frames, C, H, W) returns None if the annotation flag is off. Be careful when loading the data.
         video_path = self.keys[idx]
@@ -436,8 +436,8 @@ class TimeTYVOSDataset(VideoDataset):
 
     def __init__(self, classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform=None, target_transform=None, video_transform=None, meta_file_directory=None, regular_step=1) -> None:
         super().__init__(classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform, target_transform, video_transform, meta_file_directory, regular_step=regular_step)
-        
-        self.category_dict = make_categories_dict(self.meta_dict, "timetytvos")
+        if self.meta_dict is not None:
+            self.category_dict = make_categories_dict(self.meta_dict, "timetytvos")
 
     def __getitem__(self, idx): ### (B, num_clips, num_frames, C, H, W) returns None if the annotation flag is off. Be careful when loading the data.
         video_path = self.keys[idx]
@@ -730,7 +730,7 @@ def test_video_data_module(logger):
     sampling_mode = SamplingMode.DENSE
     video_data_module = VideoDataModule("timetytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
-    data_loader = video_data_module.get_data_loader()
+    data_loader = video_data_module.data_loader
     logging_directory = "data_loader_log/"
 
     if os.path.exists(logging_directory):
@@ -753,6 +753,56 @@ def test_video_data_module(logger):
 
 
 
+def test_video_dataloader_with_timet_transforms(logger):
+    sampling = "dense"
+    num_clips = 1
+    batch_size = 1
+    num_workers = 4
+    num_clip_frames = 8
+    regular_step = 25
+    num_crops = 4
+    logging_directory = "data_loader_log/"
+    video_transform_list = [video_transformations.RandomResizedCrop((224, 224)), video_transformations.ClipToTensor()] #video_transformations.RandomResizedCrop((224, 224))
+    target_transform = video_transformations.Compose(video_transform_list)
+    video_transform = video_transformations.TimeTTransform([224, 96], [1, num_crops], [0.35, 0.25], [1., 0.4], 1, 0.01, 1)
+    world_size = 1
+    transformations_dict = {"data_transforms": video_transform, "target_transforms": target_transform, "shared_transforms": None}
+    prefix = "/ssdstore/ssalehi/dataset"
+    data_path = os.path.join(prefix, "all_frames/train_all_frames/JPEGImages/")
+    annotation_path = "" # os.path.join(prefix, "train1/Annotations/")
+    meta_file_path = "" # os.path.join(prefix, "train1/meta.json")
+    path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
+    if sampling == "dense":
+        sampling_mode = SamplingMode.DENSE
+    elif sampling == "uniform":
+        sampling_mode = SamplingMode.UNIFORM
+    elif sampling == "full":
+        sampling_mode = SamplingMode.FULL
+    else:
+        raise ValueError("Sampling mode is not valid")
+    video_data_module = VideoDataModule("timetytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers, world_size=world_size)
+    video_data_module.setup(transformations_dict)
+    video_data_module.make_data_loader()
+    data_loader = video_data_module.get_data_loader()
+    for i, batch in enumerate(data_loader):
+        batch_crop_list, label, annotations = batch
+        global_crops_1 = batch_crop_list[0]
+        annotations = annotations.squeeze(1)
+        datum = global_crops_1
+        annotations = annotations.squeeze(1)
+        datum = datum.squeeze(1)
+        # datum = denormalize_video(datum)
+        print((torch.unique(annotations)))
+        print(datum.shape)
+        print(annotations.shape)
+        visualize_sampled_videos(datum[0], "data_loader_log/", f"test_{i}.avi")
+        local_crop = batch_crop_list[1]
+        local_crop = local_crop.squeeze(1)
+        print(local_crop.shape)
+        # local_crop = denormalize_video(local_crop)
+        visualize_sampled_videos(local_crop[0], "data_loader_log/", f"test_local_{i}.avi")
+        # visualize_sampled_videos(annotations, "data_loader_log/", f"test_anotations_{i}.avi")
+        # make_seg_maps(datum, annotations, logging_directory, f"test_seg_maps_{i}.avi")
     
 
 if __name__ == "__main__":
@@ -764,4 +814,4 @@ if __name__ == "__main__":
     # logger.finish()
 
     # get_file_path("/ssdstore/ssalehi/dataset/val1/JPEGImages/")
-    test_video_data_module(logger)
+    test_video_dataloader_with_timet_transforms(logger)

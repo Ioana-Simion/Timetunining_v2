@@ -6,6 +6,7 @@ import torchvision
 import timm
 from abc import ABCMeta, abstractmethod
 from tqdm import tqdm
+from torch.nn import init
 # from mmcv.cnn import ConvModule
 
 
@@ -241,6 +242,16 @@ class FeatureForwarder():
 
         mask = mask.reshape(h * w, h * w)
         return mask
+
+    def norm_mask(self, mask):
+        c, h, w = mask.size()
+        for cnt in range(c):
+            mask_cnt = mask[cnt,:,:]
+            if(mask_cnt.max() > 0):
+                mask_cnt = (mask_cnt - mask_cnt.min())
+                mask_cnt = mask_cnt/mask_cnt.max()
+                mask[cnt,:,:] = mask_cnt
+        return mask
     
 
     def forward(self, feature_list, first_segmentation_map):
@@ -270,7 +281,7 @@ class FeatureForwarder():
                 # seg = copy.deepcopy(frame_tar_avg.detach())
                 seg = frame_tar_avg
                 que.put([feat_tar, seg])
-                # segmentation_list.append(norm_mask(frame_tar_avg.squeeze(0)))
+                # segmentation_list.append(self.norm_mask(frame_tar_avg.squeeze(0)))
                 segmentation_list.append(frame_tar_avg.squeeze(0))
             return segmentation_list  
 
@@ -367,6 +378,143 @@ class CrossAttentionBlock(nn.Module):
         return x
 
 
+class CorrespondenceDetection():
+    def __init__(self, window_szie, spatial_resolution=14, output_resolution=96) -> None:
+        self.window_size = window_szie
+        self.neihbourhood = self.restrict_neighborhood(spatial_resolution, spatial_resolution, self.window_size)
+        self.output_resolution = output_resolution
+
+    
+    def restrict_neighborhood(self, h, w, size_mask_neighborhood):
+        # We restrict the set of source nodes considered to a spatial neighborhood of the query node (i.e. ``local attention'')
+        mask = torch.zeros(h, w, h, w)
+        for i in range(h):
+            for j in range(w):
+                for p in range(2 * size_mask_neighborhood + 1):
+                    for q in range(2 * size_mask_neighborhood + 1):
+                        if i - size_mask_neighborhood + p < 0 or i - size_mask_neighborhood + p >= h:
+                            continue
+                        if j - size_mask_neighborhood + q < 0 or j - size_mask_neighborhood + q >= w:
+                            continue
+                        mask[i, j, i - size_mask_neighborhood + p, j - size_mask_neighborhood + q] = 1
+
+        # mask = mask.reshape(h * w, h * w)
+        return mask
+
+    def __call__(self, features1, features2, crops):
+        with torch.no_grad():
+            bs, spatial_resolution, spatial_resolution, d_model = features1.shape
+            _, h, w = crops.shape
+            patch_size = h // spatial_resolution
+            crops = crops.reshape(bs, h // patch_size, patch_size, w // patch_size, patch_size).permute(0, 1, 3, 2, 4)
+            crops = crops.flatten(3, 4)
+            cropped_feature_mask = crops.sum(-1) > 0 ## size (bs, spatial_resolution, spatial_resolution)
+            ## find the idx of the croped features_mask
+            features1 = F.normalize(features1, dim=-1)
+            features2 = F.normalize(features2, dim=-1)
+            similarities = torch.einsum('bxyd,bkzd->bxykz', features1, features2)
+            most_similar_features_mask = torch.zeros(bs, spatial_resolution, spatial_resolution)
+            revised_crop = torch.zeros(bs, spatial_resolution, spatial_resolution)
+            self.neihbourhood = self.neihbourhood.to(features1.device)
+            similarities = similarities * self.neihbourhood.unsqueeze(0)
+            similarities = similarities.flatten(3, 4)
+            most_similar_cropped_patches_list = []
+            # for i, crp_feature_mask in enumerate(cropped_feature_mask): 
+            crp_feature_mask = cropped_feature_mask[0]
+            true_coords  = torch.argwhere(crp_feature_mask)
+            min_coords = true_coords.min(0).values
+            max_coords = true_coords.max(0).values
+            rectangle_shape = max_coords - min_coords + 1
+            crop_h, crop_w = rectangle_shape
+            most_similar_patches = similarities.argmax(-1)
+            most_similar_cropped_patches = most_similar_patches[cropped_feature_mask]
+            most_similar_cropped_patches = most_similar_cropped_patches.reshape(bs, crop_h, crop_w)
+            # most_similar_cropped_patches = F.interpolate(most_similar_cropped_patches.float().unsqueeze(0).unsqueeze(0), size=(self.output_resolution, self.output_resolution), mode='nearest').squeeze(0).squeeze(0)
+            # most_similar_cropped_patches_list.append(most_similar_cropped_patches)
+
+            # for i, similarity in enumerate(similarities):
+            #     croped_feature_idx = croped_feature_mask[i].nonzero()
+            #     for j, mask_idx in enumerate(croped_feature_idx):
+            #         # print(mask_idx)
+            #         revised_crop[i, mask_idx[0], mask_idx[1]] = 1
+            #         min_x, max_x = max(0, mask_idx[0] - self.window_size), min(spatial_resolution, mask_idx[0] + self.window_size)
+            #         min_y, max_y = max(0, mask_idx[1] - self.window_size), min(spatial_resolution, mask_idx[1] + self.window_size)
+            #         neiborhood_similarity = similarity[mask_idx[0], mask_idx[1], min_x:max_x, min_y:max_y]
+            #         max_value = neiborhood_similarity.max()
+            #         indices = (neiborhood_similarity == max_value).nonzero()[0]
+            #         label_patch_number = (indices[0] + min_x) * spatial_resolution + (indices[1] + min_y)
+            #         most_similar_features_mask[i, mask_idx[0], mask_idx[1]] = label_patch_number
+            
+            # most_similar_cropped_patches = torch.stack(most_similar_cropped_patches_list)
+            revised_crop = cropped_feature_mask.float() 
+            return most_similar_cropped_patches, revised_crop
+    
+
+class SlotAttention(nn.Module):
+    def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128):
+        super().__init__()
+        self.num_slots = num_slots
+        self.iters = iters
+        self.eps = eps
+        self.scale = dim ** -0.5
+
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, dim))
+
+        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, dim))
+        init.xavier_uniform_(self.slots_logsigma)
+
+        self.to_q = nn.Linear(dim, dim)
+        self.to_k = nn.Linear(dim, dim)
+        self.to_v = nn.Linear(dim, dim)
+
+        self.gru = nn.GRUCell(dim, dim)
+
+        hidden_dim = max(dim, hidden_dim)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.ReLU(inplace = True),
+            nn.Linear(hidden_dim, dim)
+        )
+
+        self.norm_input  = nn.LayerNorm(dim)
+        self.norm_slots  = nn.LayerNorm(dim)
+        self.norm_pre_ff = nn.LayerNorm(dim)
+
+    def forward(self, inputs, num_slots = None):
+        b, n, d, device, dtype = *inputs.shape, inputs.device, inputs.dtype
+        n_s = num_slots if num_slots is not None else self.num_slots
+        
+        mu = self.slots_mu.expand(b, n_s, -1)
+        sigma = self.slots_logsigma.exp().expand(b, n_s, -1)
+
+        slots = mu + sigma * torch.randn(mu.shape, device = device, dtype = dtype)
+
+        inputs = self.norm_input(inputs)        
+        k, v = self.to_k(inputs), self.to_v(inputs)
+
+        for _ in range(self.iters):
+            slots_prev = slots
+
+            slots = self.norm_slots(slots)
+            q = self.to_q(slots)
+
+            dots = torch.einsum('bid,bjd->bij', q, k) * self.scale
+            attn = dots.softmax(dim=1) + self.eps
+
+            attn = attn / attn.sum(dim=-1, keepdim=True)
+
+            updates = torch.einsum('bjd,bij->bid', v, attn)
+
+            slots = self.gru(
+                updates.reshape(-1, d),
+                slots_prev.reshape(-1, d)
+            )
+
+            slots = slots.reshape(b, -1, d)
+            slots = slots + self.mlp(self.norm_pre_ff(slots))
+
+        return slots
 
 class DistributedDataParallelModel(nn.Module):
     def __init__(self, model, gpu):

@@ -881,7 +881,7 @@ class TimeTTransform:
         self.color_transform = Compose(color_transform)
 
         # Construct final transforms
-        self.final_transform = ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        self.final_transform = ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # 
 
         # Construct randomly resized crops transforms
         self.rrc_transforms = []
@@ -938,6 +938,7 @@ class TimeTTransform:
                 sample = img
                 crop_bboxes[i] = torch.Tensor([0, 0, rrc_transform.size[0], rrc_transform.size[1]])
             img = self.color_transform(img)
+            # img = img
 
             # Apply final transform
             img = self.final_transform(img)

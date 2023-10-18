@@ -9,8 +9,8 @@ from clustering import PerDatasetClustering
 from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule
 from eval_metrics import PredsmIoU
 from evaluator import LinearFinetuneModule
-from models import FeatureExtractor, FeatureForwarder
-from my_utils import find_optimal_assignment, denormalize_video
+from models import FeatureExtractor, FeatureForwarder, CorrespondenceDetection, SlotAttention
+from my_utils import find_optimal_assignment
 import wandb
 from matplotlib.colors import ListedColormap
 from optimizer import TimeTv2Optimizer
@@ -40,15 +40,16 @@ torch.manual_seed(1)
 torch.cuda.manual_seed(1)
 
 
-class TimeTuningV2(torch.nn.Module):
-    def __init__(self, input_size, vit_model, num_prototypes=2, topk=5, context_frames=6, context_window=6, logger=None):
-        super(TimeTuningV2, self).__init__()
+class TimeTuning_SA(torch.nn.Module):
+    def __init__(self, input_size, vit_model, slot_numer=5, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None):
+        super(TimeTuning_SA, self).__init__()
         self.input_size = input_size
         self.eval_spatial_resolution = input_size // 16
         self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution, d_model=384)
         self.FF = FeatureForwarder(self.eval_spatial_resolution, context_frames, context_window, topk=topk, feature_head=None)
         self.logger = logger
         self.num_prototypes = num_prototypes
+        self.CorDet = CorrespondenceDetection(window_szie=context_window // 2)
         self.criterion = torch.nn.CrossEntropyLoss()
         self.mlp_head = torch.nn.Sequential(
             torch.nn.Linear(self.feature_extractor.d_model, 1024),
@@ -64,6 +65,8 @@ class TimeTuningV2(torch.nn.Module):
         prototype_init = torch.randn((num_prototypes, 256))
         prototype_init =  F.normalize(prototype_init, dim=-1, p=2)  
         self.prototypes = torch.nn.Parameter(prototype_init)
+        self.slot_numer = slot_numer
+        self.slot_attention = SlotAttention(slot_numer, self.feature_extractor.d_model)
     
 
     def normalize_prototypes(self):
@@ -75,12 +78,18 @@ class TimeTuningV2(torch.nn.Module):
 
 
 
-    def train_step(self, datum):
+    def train_step(self, datum, crop_list, bboxs):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
-        denormalized_video = denormalize_video(datum)
+        # denormalized_video = denormalize_video(datum)
         dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))
         _, np, dim = dataset_features.shape
+        dataset_features = dataset_features.reshape(bs, nf, np, dim)
+        first_frame_features = dataset_features[:, 0, :, :]
+        last_frame_features = dataset_features[:, -1, :, :]
+        first_frames_slots = self.slot_attention(first_frame_features)
+        last_frames_slots = self.slot_attention(last_frame_features)
+        
         target_scores_group = []
         q_group = []
 
@@ -98,9 +107,16 @@ class TimeTuningV2(torch.nn.Module):
         dataset_target_frame_scores = dataset_scores[:, -1, :, :]
         dataset_first_frame_q = dataset_first_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2).float()
         dataset_features = dataset_features.reshape(bs, nf, np, dim)
-        loss = 0
+        image_size = h
+        loca_correspondece_loss = self.correspondence_loss(crop_list, bboxs, image_size, dataset_features, dataset_q)
+        # loca_correspondece_loss = 0
         for i, clip_features in enumerate(dataset_features):
             q = dataset_first_frame_q[i]
+            ## set the maximum value of the second dimension to 1 and the rest to 0
+            q = q.argmax(dim=0)
+            q = F.one_hot(q, num_classes=self.num_prototypes).float()
+            q = q.permute(2, 0, 1)
+
             target_frame_scores = dataset_target_frame_scores[i]
             prediction = self.FF.forward(clip_features, q)
             prediction = torch.stack(prediction, dim=0)
@@ -120,7 +136,47 @@ class TimeTuningV2(torch.nn.Module):
         propagated_q_group = propagated_q_group.argmax(dim=1)
         clustering_loss = self.criterion(target_scores  / 0.1, propagated_q_group.long())
         
-        return clustering_loss
+        return clustering_loss, loca_correspondece_loss
+
+    def correspondence_loss(self, crop_list, bboxs, img_size, dataset_features, dataset_q):
+        correspondece_clustering_loss = 0
+        bs = dataset_features.size(0)
+        img1_features = dataset_features[:, 0, :, :]
+        img2_features = dataset_features[:, 1, :, :]
+        img1_features = img1_features.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.feature_extractor.d_model)
+        img2_features = img2_features.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.feature_extractor.d_model)
+        for i in range(len(crop_list)):
+            crops = crop_list[i]
+            bbox = bboxs[:, i].long()
+            cropped_labels_list = []
+            for j, bb in enumerate(bbox):
+                crop = torch.zeros((1, img_size, img_size))
+                crop[:, bb[1]:bb[3], bb[0]:bb[2]] = 1
+                sailiancy, _ = self.CorDet(img1_features[j].unsqueeze(0), img2_features[j].unsqueeze(0), crop)
+                cropped_labels = sailiancy
+                cropped_labels = torch.nn.functional.interpolate(cropped_labels.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
+                # cropped_labels = torch.arange(0, 196).reshape(14, 14).unsqueeze(0).repeat(bs, 1, 1)
+                cropped_labels = cropped_labels.long().to(img1_features.device)
+                cropped_labels_list.append(cropped_labels)
+            cropped_labels = torch.stack(cropped_labels_list).squeeze(1)
+            cropped_area = crops[:, 0]
+            cropped_area_features, _ = self.feature_extractor.forward_features(cropped_area) ## size (bs, 36, d_model)
+            cropped_area_features = self.mlp_head(cropped_area_features)
+            cropped_area_features = cropped_area_features.reshape(bs, 6, 6, -1).permute(0, 3, 1, 2)
+            cropped_area_features = F.interpolate(cropped_area_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
+            cropped_area_features = cropped_area_features.flatten(0, 2)
+            normalized_crop_features = F.normalize(cropped_area_features, dim=-1)
+            crop_scores = torch.einsum('bd,nd->bn', normalized_crop_features , self.prototypes)
+            crop_scores = crop_scores.reshape(bs, 96, 96, self.num_prototypes).permute(0, 3, 1, 2)
+            second_frame_q = dataset_q[:, 1, :, :]
+            second_frame_q = second_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2)
+            second_frame_q = second_frame_q.argmax(1)
+            cropped_q_gt = second_frame_q.flatten(1, 2)[torch.arange(second_frame_q.size(0)).unsqueeze(1), sailiancy.flatten(1, 2)].reshape(bs, sailiancy.size(-2), sailiancy.size(-1))
+            resized_crop_gt = F.interpolate(cropped_q_gt.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
+            correspondece_clustering_loss += self.criterion(crop_scores / 0.1, resized_crop_gt.long())
+        
+        correspondece_clustering_loss /= len(crop_list)
+        return correspondece_clustering_loss
     
 
     def get_params_dict(self, model, exclude_decay=True, lr=1e-4):
@@ -149,7 +205,6 @@ class TimeTuningV2(torch.nn.Module):
         self.feature_extractor.eval()
         with torch.no_grad():
             spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
-            spatial_features = self.mlp_head(spatial_features)
         return spatial_features
 
     def save(self, path):
@@ -158,7 +213,7 @@ class TimeTuningV2(torch.nn.Module):
 
         
 
-class TimeTuningV2Trainer():
+class TimeTuning_SA_Trainer():
     def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger):
         self.dataloader = data_module.data_loader
         self.test_dataloader = test_dataloader
@@ -195,12 +250,17 @@ class TimeTuningV2Trainer():
         for i, batch in enumerate(self.dataloader):
             after_loading_time = time.time()
             print("Loading Time: {}".format(after_loading_time - before_loading_time))
-            datum, annotations = batch
+            batch_crop_list, label, annotations = batch
+            global_crops_1 = batch_crop_list[0]
+            annotations = annotations.squeeze(1)
+            datum = global_crops_1
             annotations = annotations.squeeze(1)
             datum = datum.squeeze(1)
             datum = datum.to(self.device)
-            clustering_loss = self.time_tuning_model.train_step(datum)
-            total_loss = clustering_loss
+            for j, crop in enumerate(batch_crop_list):
+                batch_crop_list[j] = crop.to(self.device)
+            clustering_loss, correspondece_loss = self.time_tuning_model.train_step(datum, batch_crop_list[1:], label["bbox"][:, 1:, ])
+            total_loss = clustering_loss + 0 * correspondece_loss
             self.optimizer.zero_grad()
             total_loss.backward()
             self.optimizer.step()
@@ -208,12 +268,11 @@ class TimeTuningV2Trainer():
             epoch_loss += total_loss.item()
             print("Iteration: {} Loss: {}".format(i, total_loss.item()))
             self.logger.log({"clustering_loss": clustering_loss.item()})
+            self.logger.log({"correspondece_loss": correspondece_loss.item()})
             lr = self.optimizer.get_lr()
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
         epoch_loss /= (i + 1)
-        if epoch_loss < 2.5:
-            self.time_tuning_model.save(f"Temp/model_{epoch_loss}.pth")
         print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
@@ -229,7 +288,7 @@ class TimeTuningV2Trainer():
     def validate(self, epoch, val_spatial_resolution=56):
         self.time_tuning_model.eval()
         with torch.no_grad():
-            metric = PredsmIoU(2, 2)
+            metric = PredsmIoU(21, 21)
             # spatial_feature_dim = self.model.get_dino_feature_spatial_dim()
             spatial_feature_dim = 50
             clustering_method = PerDatasetClustering(spatial_feature_dim, 21)
@@ -256,8 +315,6 @@ class TimeTuningV2Trainer():
             valid_idx = eval_targets != 255
             valid_target = eval_targets[valid_idx]
             valid_cluster_maps = cluster_maps[valid_idx]
-            valid_target[valid_target > 0] = 1
-            valid_cluster_maps[valid_cluster_maps > 0] = 1
             metric.update(valid_target, valid_cluster_maps)
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
@@ -315,33 +372,54 @@ def run(args):
     masking_ratio = args.masking_ratio
     crop_size = args.crop_size
     crop_scale = args.crop_scale_tupple
+    num_crops = args.num_crops
+    num_prototypes = args.num_prototypes
+    topk = args.topk
+    context_frames = args.context_frames
+    context_window = args.context_window
+    sampling = args.sampling
+    regular_step = args.regular_step
+    num_clip_frames = args.num_clip_frames
+    num_clips = args.num_clips
 
     config = vars(args)
     ## make a string of today's date
     today = date.today()
     d1 = today.strftime("%d_%m_%Y")
     logger = wandb.init(project=project_name, group=d1, job_type='debug_clustering_ytvos', config=config)
-    rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
-    data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
-    data_transform = video_transformations.Compose(data_transform_list)
-    video_transform_list = [video_transformations.Resize(224), video_transformations.RandomResizedCrop((224, 224)), video_transformations.RandomHorizontalFlip(), video_transformations.ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225])] #video_transformations.RandomResizedCrop((224, 224))
-    video_transform = video_transformations.Compose(video_transform_list)
-    num_clips = 1
-    num_clip_frames = 4
-    regular_step = 1
-    transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
+    # rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
+    # data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
+    # data_transform = video_transformations.Compose(data_transform_list)
+    # video_transform_list = [video_transformations.Resize(224), video_transformations.RandomResizedCrop((224, 224)), video_transformations.RandomHorizontalFlip(), video_transformations.ClipToTensor(mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225])] #video_transformations.RandomResizedCrop((224, 224))
+    # video_transform = video_transformations.Compose(video_transform_list)
+    # num_clips = 1
+    # num_clip_frames = 4
+    # regular_step = 1
+    # transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
+    video_transform_list = [video_transformations.RandomResizedCrop((224, 224)), video_transformations.ClipToTensor()] #video_transformations.RandomResizedCrop((224, 224))
+    target_transform = video_transformations.Compose(video_transform_list)
+    video_transform = video_transformations.TimeTTransform([224, 96], [1, num_crops], [0.35, 0.25], [1., 0.4], 1, 0.01, 1)
+    world_size = 1
+    transformations_dict = {"data_transforms": video_transform, "target_transforms": target_transform, "shared_transforms": None}
     prefix = "/ssdstore/ssalehi/dataset"
-    data_path = os.path.join(prefix, "train1/JPEGImages/")
-    annotation_path = os.path.join(prefix, "train1/Annotations/")
-    meta_file_path = os.path.join(prefix, "train1/meta.json")
+    data_path = os.path.join(prefix, "all_frames/train_all_frames/JPEGImages/")
+    annotation_path = "" # os.path.join(prefix, "train1/Annotations/")
+    meta_file_path = "" # os.path.join(prefix, "train1/meta.json")
     path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
-    sampling_mode = SamplingMode.DENSE
-    video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    if sampling == "dense":
+        sampling_mode = SamplingMode.DENSE
+    elif sampling == "uniform":
+        sampling_mode = SamplingMode.UNIFORM
+    elif sampling == "full":
+        sampling_mode = SamplingMode.FULL
+    else:
+        raise ValueError("Sampling mode is not valid")
+    video_data_module = VideoDataModule("timetytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers, world_size=world_size)
     video_data_module.setup(transformations_dict)
     video_data_module.make_data_loader()
 
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
-    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger)
+    patch_prediction_model = TimeTuningV2(224, vit_model, num_prototypes=num_prototypes, topk=topk, context_frames=context_frames, context_window=context_window, logger=logger)
     optimization_config = {
         'init_lr': 1e-4,
         'peak_lr': 1e-3,
@@ -371,21 +449,26 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=str, default="cuda:3")
+    parser.add_argument('--device', type=str, default="cuda:1")
     parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--num_workers', type=int, default=12)
+    parser.add_argument('--num_workers', type=int, default=6)
     parser.add_argument('--input_size', type=int, default=224)
     parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)
     parser.add_argument('--crop_scale_tupple', type=tuple, default=(0.3, 1))
     parser.add_argument('--masking_ratio', type=float, default=1)
     parser.add_argument('--same_frame_query_ref', type=bool, default=False)
-    parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
+    parser.add_argument("--num_crops", type=int, default=4)
+    parser.add_argument("--num_prototypes", type=int, default=200)
+    parser.add_argument("--topk", type=int, default=5)
+    parser.add_argument("--context_frames", type=int, default=4)
+    parser.add_argument("--context_window", type=int, default=6)
+    parser.add_argument("--sampling", type=str, default="dense")
+    parser.add_argument("--regular_step", type=int, default=25)
+    parser.add_argument("--num_clip_frames", type=int, default=6)
+    parser.add_argument("--num_clips", type=int, default=1)
+    parser.add_argument("--explaination", type=str, default="Only clustering loss. All_frame dataset")
     args = parser.parse_args()
     run(args)
-
-
-
-        

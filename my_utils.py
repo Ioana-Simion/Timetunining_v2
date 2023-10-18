@@ -146,6 +146,28 @@ def make_seg_maps(data, cluster_map, logging_directory, name, w_featmap=28, h_fe
         convert_list_to_video(frame_buffer, name + "_" + str(i), speed=1000/ datum.size(0), directory=logging_directory, wdb_log=False)
     
 
+def visualize_sampled_videos(samples, path, name):
+    # os.system(f'rm -r {path}')
+    scale_255 = lambda x : (x * 255).astype('uint8')
+    layer, height, width = samples[0].shape[-3:]
+    if not os.path.isdir(path):
+        os.mkdir(path)
+    video = cv2.VideoWriter(path + name, 0, 1, (width,height))
+    if len(samples.shape) == 4: ## sampling a batch of images and not clips
+        frames = samples
+    else: ## clip-wise sampling
+        frames = samples[0][0]  
+
+    for frame in frames:
+        if len(frame.shape) == 3:
+            frame_1 = frame.permute(1, 2, 0).numpy()
+        else:
+            frame_1 = frame[..., None].repeat(1, 1, 3).numpy()
+        temp = scale_255(frame_1)
+        # temp = frame_1
+        video.write(temp)
+    video.release()
+    cv2.destroyAllWindows()
 
 def localize_objects(input_img, cluster_map):
 
