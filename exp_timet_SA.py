@@ -89,95 +89,31 @@ class TimeTuning_SA(torch.nn.Module):
         last_frame_features = dataset_features[:, -1, :, :]
         first_frames_slots = self.slot_attention(first_frame_features)
         last_frames_slots = self.slot_attention(last_frame_features)
+        normalized_frist_frames_slots = F.normalize(first_frames_slots, dim=-1, p=2)
+        normalized_last_frames_slots = F.normalize(last_frames_slots, dim=-1, p=2)
+        first_slot_scores = torch.einsum('bld,nkd->blnk', normalized_frist_frames_slots , self.prototypes.usnqueeze(1)).squeeze(-1)
+        first_slot_q = find_optimal_assignment(first_slot_scores, 0.05, 10)
+        last_slot_scores = torch.einsum('bld,nkd->blnk', normalized_last_frames_slots , self.prototypes.usnqueeze(1)).squeeze(-1)
+        last_slot_q = find_optimal_assignment(last_slot_scores, 0.05, 10)
+        b_propagated_scores_group = []
+        f_propagated_scores_group = []
+        for i in range(bs):
+            similarity = torch.einsum('ld,kd->lk', normalized_frist_frames_slots[i], normalized_last_frames_slots[i])
+            similarity = similarity / 0.03
+            similarity = similarity.softmax(dim=1)
+            first_slot_scores_i = first_slot_scores[i]
+            last_slot_scores_i = last_slot_scores[i]
+            f_propagated_first_slot_scores_i = torch.einsum('lk,ln->ln', similarity.T, first_slot_scores_i)
+            b_propagated_last_slot_scores_i = torch.einsum('lk,ln->ln', similarity, last_slot_scores_i)
+            b_propagated_scores_group.append(b_propagated_last_slot_scores_i)
+            f_propagated_scores_group.append(f_propagated_first_slot_scores_i)
         
-        target_scores_group = []
-        q_group = []
+        b_propagated_scores = torch.stack(b_propagated_scores_group, dim=0)
+        f_propagated_scores = torch.stack(f_propagated_scores_group, dim=0)
 
-        projected_dataset_features = self.mlp_head(dataset_features)
-        projected_dim = projected_dataset_features.shape[-1]
-        projected_dataset_features = projected_dataset_features.reshape(-1, projected_dim)
-        normalized_projected_features = F.normalize(projected_dataset_features, dim=-1, p=2)
+        loss = self.criterion(f_propagated_scores / 0.1, last_slot_q.argmax(dim=1).long()) + self.criterion(b_propagated_scores / 0.1, first_slot_q.argmax(dim=1).long())
+        return loss
 
-        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features , self.prototypes)
-        dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
-        dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
-        dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
-        dataset_first_frame_q = dataset_q[:, 0, :, :]
-        dataset_first_frame_scores = dataset_scores[:, 0, :, :]
-        dataset_target_frame_scores = dataset_scores[:, -1, :, :]
-        dataset_first_frame_q = dataset_first_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2).float()
-        dataset_features = dataset_features.reshape(bs, nf, np, dim)
-        image_size = h
-        loca_correspondece_loss = self.correspondence_loss(crop_list, bboxs, image_size, dataset_features, dataset_q)
-        # loca_correspondece_loss = 0
-        for i, clip_features in enumerate(dataset_features):
-            q = dataset_first_frame_q[i]
-            ## set the maximum value of the second dimension to 1 and the rest to 0
-            q = q.argmax(dim=0)
-            q = F.one_hot(q, num_classes=self.num_prototypes).float()
-            q = q.permute(2, 0, 1)
-
-            target_frame_scores = dataset_target_frame_scores[i]
-            prediction = self.FF.forward(clip_features, q)
-            prediction = torch.stack(prediction, dim=0)
-            propagated_q = prediction[-1]
-            target_frame_scores = target_frame_scores.reshape(self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(2, 0, 1).float()
-            target_scores_group.append(target_frame_scores)
-            q_group.append(propagated_q)
-            ## visualize the clustering
-            # cluster_map = torch.cat([q.unsqueeze(0), prediction], dim=0)
-            # cluster_map = cluster_map.argmax(dim=1)
-            # resized_cluster_map = F.interpolate(cluster_map.float().unsqueeze(0), size=(h, w), mode="nearest").squeeze(0)
-            # _, overlayed_images = overlay_video_cmap(resized_cluster_map, denormalized_video[i])
-            # convert_list_to_video(overlayed_images.detach().cpu().permute(0, 2, 3, 1).numpy(), f"Temp/overlayed_{i}.mp4", speed=1000/ nf)
-        
-        target_scores = torch.stack(target_scores_group, dim=0)
-        propagated_q_group = torch.stack(q_group, dim=0)
-        propagated_q_group = propagated_q_group.argmax(dim=1)
-        clustering_loss = self.criterion(target_scores  / 0.1, propagated_q_group.long())
-        
-        return clustering_loss, loca_correspondece_loss
-
-    def correspondence_loss(self, crop_list, bboxs, img_size, dataset_features, dataset_q):
-        correspondece_clustering_loss = 0
-        bs = dataset_features.size(0)
-        img1_features = dataset_features[:, 0, :, :]
-        img2_features = dataset_features[:, 1, :, :]
-        img1_features = img1_features.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.feature_extractor.d_model)
-        img2_features = img2_features.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.feature_extractor.d_model)
-        for i in range(len(crop_list)):
-            crops = crop_list[i]
-            bbox = bboxs[:, i].long()
-            cropped_labels_list = []
-            for j, bb in enumerate(bbox):
-                crop = torch.zeros((1, img_size, img_size))
-                crop[:, bb[1]:bb[3], bb[0]:bb[2]] = 1
-                sailiancy, _ = self.CorDet(img1_features[j].unsqueeze(0), img2_features[j].unsqueeze(0), crop)
-                cropped_labels = sailiancy
-                cropped_labels = torch.nn.functional.interpolate(cropped_labels.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
-                # cropped_labels = torch.arange(0, 196).reshape(14, 14).unsqueeze(0).repeat(bs, 1, 1)
-                cropped_labels = cropped_labels.long().to(img1_features.device)
-                cropped_labels_list.append(cropped_labels)
-            cropped_labels = torch.stack(cropped_labels_list).squeeze(1)
-            cropped_area = crops[:, 0]
-            cropped_area_features, _ = self.feature_extractor.forward_features(cropped_area) ## size (bs, 36, d_model)
-            cropped_area_features = self.mlp_head(cropped_area_features)
-            cropped_area_features = cropped_area_features.reshape(bs, 6, 6, -1).permute(0, 3, 1, 2)
-            cropped_area_features = F.interpolate(cropped_area_features, size=(96, 96), mode='bilinear').permute(0, 2, 3, 1)
-            cropped_area_features = cropped_area_features.flatten(0, 2)
-            normalized_crop_features = F.normalize(cropped_area_features, dim=-1)
-            crop_scores = torch.einsum('bd,nd->bn', normalized_crop_features , self.prototypes)
-            crop_scores = crop_scores.reshape(bs, 96, 96, self.num_prototypes).permute(0, 3, 1, 2)
-            second_frame_q = dataset_q[:, 1, :, :]
-            second_frame_q = second_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2)
-            second_frame_q = second_frame_q.argmax(1)
-            cropped_q_gt = second_frame_q.flatten(1, 2)[torch.arange(second_frame_q.size(0)).unsqueeze(1), sailiancy.flatten(1, 2)].reshape(bs, sailiancy.size(-2), sailiancy.size(-1))
-            resized_crop_gt = F.interpolate(cropped_q_gt.float().unsqueeze(1), size=(96, 96), mode='nearest').squeeze(1)
-            correspondece_clustering_loss += self.criterion(crop_scores / 0.1, resized_crop_gt.long())
-        
-        correspondece_clustering_loss /= len(crop_list)
-        return correspondece_clustering_loss
-    
 
     def get_params_dict(self, model, exclude_decay=True, lr=1e-4):
         params = []
@@ -195,8 +131,9 @@ class TimeTuning_SA(torch.nn.Module):
     def get_optimization_params(self):
         feature_extractor_params = self.get_params_dict(self.feature_extractor,exclude_decay=True, lr=1e-5)
         mlp_head_params = self.get_params_dict(self.mlp_head,exclude_decay=True, lr=1e-4)
+        SA_params = self.get_params_dict(self.slot_attention,exclude_decay=True, lr=1e-4)
         prototypes_params = [{'params': self.prototypes, 'lr': 1e-4}]
-        all_params = feature_extractor_params + mlp_head_params + prototypes_params
+        all_params = feature_extractor_params + mlp_head_params + prototypes_params + SA_params
         return all_params
 
 
@@ -259,16 +196,15 @@ class TimeTuning_SA_Trainer():
             datum = datum.to(self.device)
             for j, crop in enumerate(batch_crop_list):
                 batch_crop_list[j] = crop.to(self.device)
-            clustering_loss, correspondece_loss = self.time_tuning_model.train_step(datum, batch_crop_list[1:], label["bbox"][:, 1:, ])
-            total_loss = clustering_loss + 0 * correspondece_loss
+            loss = self.time_tuning_model.train_step(datum, batch_crop_list[1:], label["bbox"][:, 1:, ])
+            total_loss = loss
             self.optimizer.zero_grad()
             total_loss.backward()
             self.optimizer.step()
             self.optimizer.update_lr()
             epoch_loss += total_loss.item()
             print("Iteration: {} Loss: {}".format(i, total_loss.item()))
-            self.logger.log({"clustering_loss": clustering_loss.item()})
-            self.logger.log({"correspondece_loss": correspondece_loss.item()})
+            self.logger.log({"clustering_loss": loss.item()})
             lr = self.optimizer.get_lr()
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
@@ -419,7 +355,7 @@ def run(args):
     video_data_module.make_data_loader()
 
     vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
-    patch_prediction_model = TimeTuningV2(224, vit_model, num_prototypes=num_prototypes, topk=topk, context_frames=context_frames, context_window=context_window, logger=logger)
+    patch_prediction_model = TimeTuning_SA(224, vit_model, num_prototypes=num_prototypes, topk=topk, context_frames=context_frames, context_window=context_window, logger=logger)
     optimization_config = {
         'init_lr': 1e-4,
         'peak_lr': 1e-3,
@@ -437,7 +373,7 @@ def run(args):
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger)
+    patch_prediction_trainer = TimeTuning_SA_Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger)
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 
