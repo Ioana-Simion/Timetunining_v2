@@ -62,7 +62,7 @@ class TimeTuning_SA(torch.nn.Module):
         )
         # self.lc = torch.nn.Linear(self.feature_extractor.d_model, self.eval_spatial_resolution ** 2)
         self.feature_extractor.freeze_feature_extractor(["blocks.11", "blocks.10"])
-        prototype_init = torch.randn((num_prototypes, 256))
+        prototype_init = torch.randn((num_prototypes, 384))
         prototype_init =  F.normalize(prototype_init, dim=-1, p=2)  
         self.prototypes = torch.nn.Parameter(prototype_init)
         self.slot_numer = slot_numer
@@ -91,10 +91,13 @@ class TimeTuning_SA(torch.nn.Module):
         last_frames_slots = self.slot_attention(last_frame_features)
         normalized_frist_frames_slots = F.normalize(first_frames_slots, dim=-1, p=2)
         normalized_last_frames_slots = F.normalize(last_frames_slots, dim=-1, p=2)
-        first_slot_scores = torch.einsum('bld,nkd->blnk', normalized_frist_frames_slots , self.prototypes.usnqueeze(1)).squeeze(-1)
-        first_slot_q = find_optimal_assignment(first_slot_scores, 0.05, 10)
-        last_slot_scores = torch.einsum('bld,nkd->blnk', normalized_last_frames_slots , self.prototypes.usnqueeze(1)).squeeze(-1)
-        last_slot_q = find_optimal_assignment(last_slot_scores, 0.05, 10)
+        bs, ns, d = normalized_frist_frames_slots.shape
+        first_slot_scores = torch.einsum('bd,nd->bn', normalized_frist_frames_slots.view(bs * ns, -1) , self.prototypes)
+        first_slot_q = find_optimal_assignment(first_slot_scores, 0.05, 10).reshape(bs, ns, -1)
+        last_slot_scores = torch.einsum('bd,nd->bn', normalized_last_frames_slots.view(bs * ns, -1) , self.prototypes)
+        last_slot_q = find_optimal_assignment(last_slot_scores, 0.05, 10).reshape(bs, ns, -1)
+        first_slot_scores = first_slot_scores.reshape(bs, ns, -1)
+        last_slot_scores = last_slot_scores.reshape(bs, ns, -1)
         b_propagated_scores_group = []
         f_propagated_scores_group = []
         for i in range(bs):
@@ -322,7 +325,7 @@ def run(args):
     ## make a string of today's date
     today = date.today()
     d1 = today.strftime("%d_%m_%Y")
-    logger = wandb.init(project=project_name, group=d1, job_type='debug_clustering_ytvos', config=config)
+    logger = wandb.init(project=project_name, mode="disabled", group=d1, job_type='debug_clustering_ytvos', config=config)
     # rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
     # data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
     # data_transform = video_transformations.Compose(data_transform_list)
@@ -337,8 +340,8 @@ def run(args):
     video_transform = video_transformations.TimeTTransform([224, 96], [1, num_crops], [0.35, 0.25], [1., 0.4], 1, 0.01, 1)
     world_size = 1
     transformations_dict = {"data_transforms": video_transform, "target_transforms": target_transform, "shared_transforms": None}
-    prefix = "/ssdstore/ssalehi/dataset"
-    data_path = os.path.join(prefix, "all_frames/train_all_frames/JPEGImages/")
+    prefix = "/var/scratch/ssalehid/ytvos/"
+    data_path = os.path.join(prefix, "train1//JPEGImages/")
     annotation_path = "" # os.path.join(prefix, "train1/Annotations/")
     meta_file_path = "" # os.path.join(prefix, "train1/meta.json")
     path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
@@ -385,7 +388,7 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=str, default="cuda:1")
+    parser.add_argument('--device', type=str, default="cuda:0")
     parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)
@@ -403,7 +406,7 @@ if __name__ == "__main__":
     parser.add_argument("--context_window", type=int, default=6)
     parser.add_argument("--sampling", type=str, default="dense")
     parser.add_argument("--regular_step", type=int, default=25)
-    parser.add_argument("--num_clip_frames", type=int, default=6)
+    parser.add_argument("--num_clip_frames", type=int, default=4)
     parser.add_argument("--num_clips", type=int, default=1)
     parser.add_argument("--explaination", type=str, default="Only clustering loss. All_frame dataset")
     args = parser.parse_args()
