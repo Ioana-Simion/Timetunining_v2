@@ -442,7 +442,7 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=str, default="cuda:0")
+    parser.add_argument('--device', type=str, default="cuda:4")
     parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)

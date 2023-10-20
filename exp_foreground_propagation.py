@@ -232,7 +232,7 @@ class TimeTuningV2Trainer():
             metric = PredsmIoU(2, 2)
             # spatial_feature_dim = self.model.get_dino_feature_spatial_dim()
             spatial_feature_dim = 50
-            clustering_method = PerDatasetClustering(spatial_feature_dim, 21)
+            clustering_method = PerDatasetClustering(spatial_feature_dim, 2)
             feature_spatial_resolution = self.time_tuning_model.feature_extractor.eval_spatial_resolution
             feature_group = []
             targets = []
@@ -371,7 +371,7 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=str, default="cuda:3")
+    parser.add_argument('--device', type=str, default="cuda:0")
     parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)
@@ -382,7 +382,7 @@ if __name__ == "__main__":
     parser.add_argument('--crop_scale_tupple', type=tuple, default=(0.3, 1))
     parser.add_argument('--masking_ratio', type=float, default=1)
     parser.add_argument('--same_frame_query_ref', type=bool, default=False)
-    parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
+    parser.add_argument("--explaination", type=str, default="Foreground Propagation")
     args = parser.parse_args()
     run(args)
 
