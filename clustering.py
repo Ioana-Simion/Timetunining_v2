@@ -3,13 +3,33 @@ import faiss
 from sklearn.preprocessing import StandardScaler
 
 
+
+class ClusteringFactory():
+    def __init__(self, pca_feature_dimension, class_number, clustering_mode) -> None:
+        super().__init__()
+        self.clustering_mode = clustering_mode
+        self.prj_feature_dimension = pca_feature_dimension
+        self.class_number = class_number
+    
+    def get_clustering(self):
+        if self.clustering_mode == "per_frame":
+            return PerFrameClustering(self.prj_feature_dimension, self.class_number)
+        elif self.clustering_mode == "per_clip":
+            return PerClipClustering(self.prj_feature_dimension, self.class_number)
+        elif self.clustering_mode == "per_dataset":
+            return PerDatasetClustering(self.prj_feature_dimension, self.class_number)
+        else:
+            raise NotImplementedError()
+
+
 class Clustering():
-    def __init__(self, feature_dimension, class_number) -> None:
+    def __init__(self, prj_feature_dimension, class_number) -> None:
         super().__init__()
         self.ncentroids = class_number
         self.niter = 20
         self.verbose = True
-        self.kmeans = faiss.Kmeans(feature_dimension, self.ncentroids, niter=self.niter, verbose=self.verbose, gpu=True)
+        self.prj_feature_dimension = prj_feature_dimension
+        self.kmeans = faiss.Kmeans(prj_feature_dimension, self.ncentroids, niter=self.niter, verbose=self.verbose, gpu=True)
     
     def cluster(self, features):
         raise NotImplementedError()
@@ -40,7 +60,7 @@ class PerFrameClustering(Clustering):
     def cluster(self, features):
         cluster_maps = torch.zeros_like(features)
         bs, nf, np, d = features.shape
-        features = self.normalize_and_transform(features.reshape(-1, d), 50).reshape(bs, nf, np, 50)
+        features = self.normalize_and_transform(features.reshape(-1, d), self.prj_feature_dimension).reshape(bs, nf, np, self.prj_feature_dimension)
         for clip in range(bs):
             for frame in range(nf):
                 x = features[clip, frame, :, :].cpu().numpy()
@@ -52,15 +72,17 @@ class PerFrameClustering(Clustering):
 class PerClipClustering(Clustering):
 
     def cluster(self, features):
-        cluster_maps = torch.zeros_like(features)
+        device = features.device
+        features = features.detach().cpu()
+        cluster_maps = torch.zeros(features.shape[0], features.shape[1], features.shape[2])
         bs, nf, np, d = features.shape
-        features = self.normalize_and_transform(features.reshape(-1, d), 50).reshape(bs, nf, np, 50)
+        features = self.normalize_and_transform(features.reshape(-1, d), self.prj_feature_dimension).reshape(bs, nf, np, self.prj_feature_dimension)
         for clip in range(bs):
-            x = features[clip, :, :, :].cpu().numpy()
-            x = x.reshape(nf*np, d)
+            x = features[clip, :, :, :]
+            x = x.reshape(nf*np, self.prj_feature_dimension)
             self.kmeans.train(x)
             D, I = self.kmeans.index.search(x, 1)
-            cluster_maps[clip, :, :, :] = torch.from_numpy(I.reshape(nf, np, 1)).to(features.device)
+            cluster_maps[clip, :, :] = torch.from_numpy(I.reshape(nf, np)).to(device)
         return cluster_maps
 
 
@@ -70,7 +92,7 @@ class PerDatasetClustering(Clustering):
         bs, nf, np, d = features.shape
         x = features.cpu()
         x = x.reshape(bs*nf*np, d)
-        x = self.normalize_and_transform(x, 50)
+        x = self.normalize_and_transform(x, self.prj_feature_dimension)
         self.kmeans.train(x)
         D, I = self.kmeans.index.search(x, 1)
         cluster_maps = torch.from_numpy(I.reshape(bs, nf, np, 1)).to(features.device)

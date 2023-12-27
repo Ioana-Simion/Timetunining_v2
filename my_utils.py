@@ -102,7 +102,9 @@ def denormalize_video(video):
     """
     video: [1, nf, c, h, w]
     """
-    denormalized_video = video.cpu().detach() * torch.tensor([0.225, 0.225, 0.225]).view(1, 1, 3, 1, 1) + torch.tensor([0.45, 0.45, 0.45]).view(1, 1, 3, 1, 1)
+    IMGNET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1)
+    IMGNET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1)
+    denormalized_video = video.cpu().detach() * IMGNET_STD + IMGNET_MEAN
     denormalized_video = (denormalized_video * 255).type(torch.uint8)
     denormalized_video = denormalized_video.squeeze(0)
     return denormalized_video
@@ -112,6 +114,8 @@ def overlay_video_cmap(cluster_maps, denormalized_video):
     cluster_maps: [nf, h, w]
     denormalized_video: [nf, c, h, w]
     """
+    ## generate 12 distinguishable colors
+    colors = ["orange", "blue", "red", "yellow", "white", "green", "brown", "purple", "gold", "black", "pink", "cyan"]
         ## convert cluster_maps to [num_maps, h, w]
     masks = []
     cluster_ids = torch.unique(cluster_maps)
@@ -127,7 +131,7 @@ def overlay_video_cmap(cluster_maps, denormalized_video):
     cluster_maps = torch.stack(masks)
             
     overlayed = [
-                draw_segmentation_masks(img, masks=mask, alpha=0.5)
+                draw_segmentation_masks(img, masks=mask, alpha=0.5, colors=colors)
                 for img, mask in zip(denormalized_video, cluster_maps)
             ]
     overlayed = torch.stack(overlayed)

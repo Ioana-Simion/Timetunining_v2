@@ -15,6 +15,9 @@ from torchvision import transforms
 from timm.models.vision_transformer import vit_small_patch16_224, vit_base_patch8_224
 import timm
 
+
+
+
 class HummingbirdEvaluation():
     def __init__(self, feature_extractor, dataset_module, num_neighbour, augmentation_epoch, memory_size, device):
         self.feature_extractor = feature_extractor

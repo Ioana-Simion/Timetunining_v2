@@ -30,6 +30,8 @@ from abc import ABC, abstractmethod
 import os
 import scipy.io as sio
 from torchvision.datasets import CIFAR10
+from pycocotools.coco import COCO
+from typing import Any, Callable, List, Optional, Tuple
 
 
 project_name = "TimeTuning_v2"
@@ -650,6 +652,117 @@ class VideoDataModule():
     
     def get_data_loader(self):
         return self.data_loader
+
+
+class CocoDetection(VisionDataset):
+    """`MS Coco Detection <https://cocodataset.org/#detection-2016>`_ Dataset.
+
+    It requires the `COCO API to be installed <https://github.com/pdollar/coco/tree/master/PythonAPI>`_.
+
+    Args:
+        root (string): Root directory where images are downloaded to.
+        annFile (string): Path to json annotation file.
+        transform (callable, optional): A function/transform that  takes in an PIL image
+            and returns a transformed version. E.g, ``transforms.PILToTensor``
+        target_transform (callable, optional): A function/transform that takes in the
+            target and transforms it.
+        transforms (callable, optional): A function/transform that takes input sample and its target as entry
+            and returns a transformed version.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        annFile: str,
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        transforms: Optional[Callable] = None,
+    ) -> None:
+        super().__init__(root, transforms, transform, target_transform)
+        from pycocotools.coco import COCO
+
+        self.coco = COCO(annFile)
+        self.ids = list(sorted(self.coco.imgs.keys()))
+
+    def _load_image(self, id: int) -> Image.Image:
+        path = self.coco.loadImgs(id)[0]["file_name"]
+        return Image.open(os.path.join(self.root, path)).convert("RGB")
+
+    def _load_target(self, id: int) -> List[Any]:
+        return self.coco.loadAnns(self.coco.getAnnIds(id))
+
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        id = self.ids[index]
+        image = self._load_image(id)
+        target = self._load_target(id)
+
+        if self.transform is not None:
+            image = self.transform(image)
+            target = torch.Tensor([0])
+
+        elif self.transforms is not None:
+            image, target = self.transforms(image, target)
+
+        return image, target
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    
+
+
+class CocoDataModule():
+    def __init__(self, batch_size, train_transform, val_transform, test_transform,  img_dir="", annotation_dir="", num_workers=0) -> None:
+        super().__init__()
+        self.num_workers = num_workers
+        self.batch_size = batch_size
+        self.img_dir = img_dir
+        self.annotation_dir = annotation_dir
+        self.image_train_transform = train_transform["img"]
+        self.image_val_transform = val_transform["img"]
+        self.image_test_transform = test_transform["img"]
+        self.target_train_transform = None
+        self.target_val_transform = None
+        self.target_test_transform = None
+        self.shared_train_transform = train_transform["shared"]
+        self.shared_val_transform = val_transform["shared"]
+        self.shared_test_transform = test_transform["shared"]
+        
+    
+    def setup(self):
+        self.train_dataset = CocoDetection(self.img_dir, self.annotation_dir, transform=self.image_train_transform)
+        self.val_dataset = CocoDetection(self.img_dir, self.annotation_dir, transforms=self.shared_val_transform)
+        self.test_dataset = CocoDetection(self.img_dir, self.annotation_dir, transforms=self.shared_test_transform)
+        print(f"Train size : {len(self.train_dataset)}")
+        print(f"Val size : {len(self.val_dataset)}")
+
+    def get_train_dataloader(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        return DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
+    
+    def get_val_dataloader(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        return DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+    
+    def get_test_dataloader(self, batch_size=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        return DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+    
+    def get_train_dataset_size(self):
+        return len(self.train_dataset)
+    
+    def get_val_dataset_size(self):
+        return len(self.val_dataset)
+    
+    def get_test_dataset_size(self):
+        return len(self.test_dataset)
+    
+    def get_module_name(self):
+        return "CocoDataModule"
+    
+    def get_num_classes(self):
+        return 91
+    
     
 
     
