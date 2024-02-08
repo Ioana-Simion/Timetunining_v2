@@ -451,13 +451,14 @@ class CorrespondenceDetection():
     
 
 class SlotAttention(nn.Module):
-    def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128):
+    def __init__(self, num_slots, dim, iters = 3, use_gru=False, use_kv=False, eps = 1e-8, hidden_dim = 128, output_dim = 256):
         super().__init__()
         self.num_slots = num_slots
         self.iters = iters
         self.eps = eps
         self.scale = dim ** -0.5
-
+        self.use_gru = use_gru
+        self.use_kv = use_kv
         self.slots_mu = nn.Parameter(torch.randn(1, 1, dim))
 
         self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, dim))
@@ -470,11 +471,16 @@ class SlotAttention(nn.Module):
         self.gru = nn.GRUCell(dim, dim)
 
         hidden_dim = max(dim, hidden_dim)
+        self.output_dim = output_dim
 
         self.mlp = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
-            nn.ReLU(inplace = True),
-            nn.Linear(hidden_dim, dim)
+            torch.nn.Linear(dim, 1024),
+            torch.nn.GELU(),
+            torch.nn.Linear(1024, 1024),
+            torch.nn.GELU(),
+            torch.nn.Linear(1024, 512),
+            torch.nn.GELU(),
+            torch.nn.Linear(512, output_dim),
         )
 
         self.norm_input  = nn.LayerNorm(dim)
@@ -490,14 +496,17 @@ class SlotAttention(nn.Module):
 
         slots = mu + sigma * torch.randn(mu.shape, device = device, dtype = dtype)
 
-        inputs = self.norm_input(inputs)        
-        k, v = self.to_k(inputs), self.to_v(inputs)
-
+        inputs = self.norm_input(inputs)      
+        if self.use_kv:  
+            k, v = self.to_k(inputs), self.to_v(inputs)
+        else:
+            k = inputs
+            v = inputs
         for _ in range(self.iters):
             slots_prev = slots
 
             slots = self.norm_slots(slots)
-            q = self.to_q(slots)
+            q = slots
 
             dots = torch.einsum('bid,bjd->bij', q, k) * self.scale
             attn = dots.softmax(dim=1) + self.eps
@@ -505,16 +514,18 @@ class SlotAttention(nn.Module):
             attn = attn / attn.sum(dim=-1, keepdim=True)
 
             updates = torch.einsum('bjd,bij->bid', v, attn)
-
-            slots = self.gru(
-                updates.reshape(-1, d),
-                slots_prev.reshape(-1, d)
-            )
-
+            if self.use_gru:
+                slots = self.gru(
+                    updates.reshape(-1, d),
+                    slots_prev.reshape(-1, d)
+                )
+                slots = updates.reshape(-1, d) + slots
+            else:
+                slots = updates
             slots = slots.reshape(b, -1, d)
-            slots = slots + self.mlp(self.norm_pre_ff(slots))
+        slots = self.mlp(self.norm_pre_ff(slots))
 
-        return slots
+        return updates, slots
 
 class DistributedDataParallelModel(nn.Module):
     def __init__(self, model, gpu):

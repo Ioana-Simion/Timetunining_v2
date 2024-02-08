@@ -163,6 +163,66 @@ class Cifar10_Handler(Dataset):
 
 
 
+class ImangeNet_100_Handler(Dataset):
+    def __init__(self, batch_size, dataset_path, transformations, val_transformations, num_workers, device=None):
+        self.batch_size = batch_size
+        self.dataset_path = dataset_path
+        self.num_workers = num_workers
+        self.device = device
+        self.dataset_name = "ImageNet_100"
+        self.num_classes = 100
+        self.transform = transformations
+        self.val_transform = val_transformations
+        self.image_train_transform = transformations["img"]
+        self.image_val_transform = transformations["img"]
+        self.image_test_transform = transformations["img"]
+        self.target_train_transform = None
+        self.target_val_transform = None
+        self.target_test_transform = None
+        self.shared_train_transform = transformations["shared"]
+        self.shared_val_transform = val_transformations["shared"]
+        self.shared_test_transform = val_transformations["shared"]
+
+
+    def setup(self):
+        self.train_dataset = ImageFolder(root=f"{self.dataset_path}/train", transform=self.image_train_transform)
+        self.test_dataset = ImageFolder(root=f"{self.dataset_path}/val", transform=self.val_transform )
+        ## split the dataset to train and validation
+        print("Normal Subset Size: ", len(self.train_dataset))
+        self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.train_dataset, [int(len(self.train_dataset)*0.9), int(len(self.train_dataset)*0.1)])
+        self.train_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        self.test_loader = torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        self.val_loader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+
+    def get_train_dataloader(self):
+        return self.train_loader
+
+    def get_test_dataloader(self):
+        return self.test_loader
+
+    def get_val_dataloader(self):
+        return self.val_loader
+
+    def get_train_dataset(self):
+        return self.train_dataset
+
+    def get_test_dataset(self):
+        return self.test_dataset
+
+    def get_val_dataset(self):
+        return self.val_dataset
+
+    def get_num_classes(self):
+        return self.num_classes
+
+    def get_dataset_name(self):
+        return self.dataset_name
+    
+    def get_normal_classes(self):
+        return self.normal_classes
+
+
+
 class SamplingMode(Enum):
     UNIFORM = 0
     DENSE = 1

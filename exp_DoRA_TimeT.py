@@ -4,7 +4,7 @@ import time
 import numpy as np
 import torch.nn.functional as F
 from clustering import PerDatasetClustering
-from data_loader import CocoDataModule, PascalVOCDataModule
+from data_loader import CocoDataModule, ImangeNet_100_Handler, PascalVOCDataModule
 from dino_vision_transformer import vit_base, VisionTransformer
 from eval_metrics import PredsmIoU
 from evaluator import LinearFinetuneModule
@@ -20,6 +20,7 @@ import torch.nn as nn
 from PIL import ImageFilter, Image
 from optimizer import TimeTv2Optimizer
 import random
+from models import SlotAttention
 
 
 
@@ -385,13 +386,14 @@ def timet_dora(device, model, logger, data_loader):
 
 
 class TimeTDoRA(torch.nn.Module):
-    def __init__(self, vit_model, num_prototypes=200, mask_ratio=None, logger=None):
+    def __init__(self, vit_model, num_prototypes=200, num_slots=0, itr=1, use_gru=False, use_kv=False, mask_ratio=None, logger=None, loss=None, use_registers=False, slot_source="backbone_features"):
         super(TimeTDoRA, self).__init__()
         self.feature_extractor = vit_model
         self.logger = logger
         self.mask_ratio = mask_ratio
         self.num_prototypes = num_prototypes
         self.criterion = torch.nn.CrossEntropyLoss()
+        self.loss = loss
         self.mlp_head = torch.nn.Sequential(
             torch.nn.Linear(self.feature_extractor.embed_dim, 1024),
             torch.nn.GELU(),
@@ -401,11 +403,26 @@ class TimeTDoRA(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(512, 256),
         )
+        # self.local_head = torch.nn.Sequential(
+        #     torch.nn.Linear(self.feature_extractor.embed_dim, 512),
+        #     torch.nn.GELU(),
+        #     torch.nn.Linear(512, self.feature_extractor.embed_dim),
+        # )
         # self.lc = torch.nn.Linear(self.feature_extractor.d_model, self.eval_spatial_resolution ** 2)
         self.freeze_feature_extractor(["blocks.11", "blocks.10"])
         prototype_init = torch.randn((num_prototypes, 256))
         prototype_init =  F.normalize(prototype_init, dim=-1, p=2)  
         self.prototypes = torch.nn.Parameter(prototype_init)
+        self.use_registers = use_registers
+        self.slot_source = slot_source
+        if num_slots != 0:
+            self.num_slots = num_slots
+            if self.slot_source == "backbone_features":
+                slot_dim = self.feature_extractor.embed_dim
+            elif self.slot_source == "projected_features":
+                slot_dim = 256
+            self.slots = SlotAttention(num_slots=num_slots, dim=slot_dim, iters=itr, use_gru=use_gru, use_kv=use_kv)
+        self.slot_source = slot_source
     
 
     def normalize_prototypes(self):
@@ -425,21 +442,39 @@ class TimeTDoRA(torch.nn.Module):
             
 
     def train_step(self, batch_data):
+        ## normalize the prototypes
+        self.normalize_prototypes()
+        if self.loss == "mask_consistency_global_prototype":
+            clustering_loss = self.pipeline_2(batch_data)
+            total_loss = mask_loss + clustering_loss
+        elif self.loss == "mask_consistency":
+            mask_loss = self.mask_consistency_loss(batch_data)
+            total_loss = mask_loss
+        elif self.loss == "global_prototype":
+            clustering_loss = self.pipeline_2(batch_data)
+            total_loss = clustering_loss
+        else:
+            raise NotImplementedError
+        return total_loss
+
+    def pipeline_1(self, batch_data):
         self.normalize_prototypes()
         bs, c, h, w = batch_data.shape
         # denormalized_video = denormalize_video(datum)
-        attn = self.feature_extractor.get_last_selfattention(batch_data)
-        cls_attn = attn[:, :, 0, 1:]
-        features = self.feature_extractor.forward_features(batch_data)
-        global_prototypes = torch.einsum("bhp,bpd->bhd", cls_attn, features)
-        ## normalize the prototypes
+        features = self.feature_extractor.forward_features(batch_data) # (B, np, dim)
+        if self.num_slots != 0:
+            registers, global_prototypes = self.slots(features)
+        else:
+            attn = self.feature_extractor.get_last_selfattention(batch_data)
+            cls_attn = attn[:, :, 0, 1:]
+            global_prototypes = torch.einsum("bhp,bpd->bhd", cls_attn, features)
         global_prototypes = global_prototypes / global_prototypes.norm(dim=-1, keepdim=True)
         cluster_maps = []
         normalised_features = features / features.norm(dim=-1, keepdim=True)
-        for i, prototype in enumerate(global_prototypes):
+        for i, prototype in enumerate(registers):
             scores = torch.einsum("pd,hd->ph", normalised_features[i], prototype)
-            q = find_optimal_assignment(scores, 0.05, 20)
-            # q = scores
+            # q = find_optimal_assignment(scores, 0.05, 20)
+            q = scores
             cluster_map = q.argmax(dim=-1)
             # cluster_map = cluster_map.view(eval_spatial_res, eval_spatial_res)
             cluster_maps.append(cluster_map)
@@ -449,16 +484,88 @@ class TimeTDoRA(torch.nn.Module):
         unmasked_cluster_ids = cluster_maps[torch.arange(bs).unsqueeze(1), ids_to_keep].reshape(bs, ids_to_keep.size(-1))
 
         batch_scores, batch_q = self.extract_assignments(global_prototypes)
-        batch_unmasked_scores, batch_unmasked_q = self.extract_assignments(unmasked_features)
+        unmasked_projected_features = self.mlp_head(unmasked_features)
+        batch_unmasked_scores, batch_unmasked_q = self.extract_assignments(unmasked_projected_features)
         batch_unmasked_scores = batch_unmasked_scores.permute(0, 2, 1)
         batch_q = batch_q.argmax(dim=-1)
         gt_unmasked_q = batch_q[torch.arange(batch_q.size(0)).unsqueeze(1), unmasked_cluster_ids].reshape(bs, unmasked_cluster_ids.size(-1))
         clustering_loss = self.criterion(batch_unmasked_scores  / 0.1, gt_unmasked_q.long())
-        return clustering_loss
+        contrastive_loss = self.local_contrastive_loss(registers, unmasked_features, unmasked_cluster_ids)
+        return clustering_loss,contrastive_loss
 
-    def extract_assignments(self, features):
-        bs, np, dim = features.shape
-        projected_features = self.mlp_head(features)
+
+    def pipeline_2(self, batch_data):
+        bs, c, h, w = batch_data.shape
+        # denormalized_video = denormalize_video(datum)
+        features = self.feature_extractor.forward_features(batch_data) ## bs, np, dim
+        prj_features = self.mlp_head(features) ## bs, np, dim
+        if self.num_slots != 0:
+            if self.slot_source == "backbone_features":
+                registers, object_prototypes = self.slots(features)
+            elif self.slot_source == "projected_features":
+                registers, object_prototypes = self.slots(prj_features) ## bs, num_slots, dim
+        else:
+            raise NotImplementedError
+        normalised_register = registers / registers.norm(dim=-1, keepdim=True)
+        normalised_features = prj_features / prj_features.norm(dim=-1, keepdim=True)
+        object_prototypes = object_prototypes / object_prototypes.norm(dim=-1, keepdim=True)
+        if self.use_registers:
+            if self.slot_source == "backbone_features":
+                normalised_features = features / features.norm(dim=-1, keepdim=True)
+            feature_objprto_sim = torch.einsum("bpd,bhd->bph", normalised_features, normalised_register)
+        else:
+            feature_objprto_sim = torch.einsum("bpd,bhd->bph", normalised_features, object_prototypes)
+        objprto_prototype_sim = torch.einsum("bd,pd->bp", object_prototypes.flatten(0, 1), self.prototypes).reshape(bs, self.num_slots, self.num_prototypes)
+        feature_prototype_indir_sim = torch.einsum("bpo,bol->bpl", feature_objprto_sim, objprto_prototype_sim)
+        bs, np, _ = feature_prototype_indir_sim.shape
+        batch_feature_q = find_optimal_assignment(feature_prototype_indir_sim.flatten(0, 1), 0.05, 10)
+        batch_feature_q = batch_feature_q.reshape(bs, np, self.num_prototypes)
+        batch_feature_q = batch_feature_q.argmax(dim=-1)
+
+        feature_prototype_indir_sim = feature_prototype_indir_sim / 0.1
+
+        batch_scores, batch_q = self.extract_assignments(prj_features)
+        batch_q = batch_q.argmax(dim=-1)
+        batch_scores = batch_scores / 0.1
+
+        loss = self.criterion(feature_prototype_indir_sim.permute(0, 2, 1), batch_q.long())
+        loss1 = self.criterion(batch_scores.permute(0, 2, 1), batch_feature_q.long())
+        return loss + loss1
+
+
+    def mask_consistency_loss(self, batch_data):
+        bs, c, h, w = batch_data.shape
+        # denormalized_video = denormalize_video(datum)
+        features = self.feature_extractor.forward_features(batch_data) ## bs, np, dim
+        prj_features = self.mlp_head(features) ## bs, np, dim
+        batch_scores, batch_q = self.extract_assignments(prj_features)
+        unmasked_features, ids_to_keep = self.feature_extractor.masking_forward_features(batch_data, mask_ratio=self.mask_ratio)
+        unmasked_projected_features = self.mlp_head(unmasked_features)
+        batch_unmasked_scores, batch_unmasked_q = self.extract_assignments(unmasked_projected_features)
+        batch_unmasked_scores = batch_unmasked_scores.permute(0, 2, 1)
+        batch_q = batch_q.argmax(dim=-1)
+        batch_unmasked_q = batch_unmasked_q.argmax(dim=-1)
+        gt_unmasked_q = batch_q[torch.arange(batch_q.size(0)).unsqueeze(1), ids_to_keep].reshape(bs, ids_to_keep.size(-1))
+        unmasked_scores = batch_scores[torch.arange(batch_scores.size(0)).unsqueeze(1), ids_to_keep].reshape(bs, ids_to_keep.size(-1), self.num_prototypes)
+        clustering_loss_1 = self.criterion(batch_unmasked_scores  / 0.1, gt_unmasked_q.long())
+        clustering_loss_2 = self.criterion(unmasked_scores.permute(0, 2, 1), batch_unmasked_q.long())
+        return clustering_loss_1 + clustering_loss_2
+
+        
+
+    def local_contrastive_loss(self, registers, unmasked_features, unmasked_cluster_ids):
+        unmasked_features = self.local_head(unmasked_features)
+        unmasked_features = unmasked_features / unmasked_features.norm(dim=-1, keepdim=True)
+        similarity_matrix = torch.einsum("bpd,bhd->bph", unmasked_features, registers)
+        similarity_matrix = similarity_matrix / 0.1
+        similarity_matrix = similarity_matrix.permute(0, 2, 1)
+        gt_unmasked = unmasked_cluster_ids
+        loss = self.criterion(similarity_matrix, gt_unmasked.long())
+        return loss
+
+
+    def extract_assignments(self, projected_features):
+        bs, np, dim = projected_features.shape
         projected_dim = projected_features.shape[-1]
         projected_features = projected_features.reshape(-1, projected_dim)
         normalized_projected_features = F.normalize(projected_features, dim=-1, p=2)
@@ -487,7 +594,11 @@ class TimeTDoRA(torch.nn.Module):
         feature_extractor_params = self.get_params_dict(self.feature_extractor,exclude_decay=True, lr=1e-5)
         mlp_head_params = self.get_params_dict(self.mlp_head,exclude_decay=True, lr=1e-4)
         prototypes_params = [{'params': self.prototypes, 'lr': 1e-4}]
-        all_params = feature_extractor_params + mlp_head_params + prototypes_params
+        if self.num_slots != 0:
+            slots_params = self.get_params_dict(self.slots, exclude_decay=True, lr=1e-4)
+            all_params = feature_extractor_params + mlp_head_params + prototypes_params + slots_params
+        else: 
+            all_params = feature_extractor_params + mlp_head_params + prototypes_params
         return all_params
 
 
@@ -539,8 +650,38 @@ class TimeTDoRA(torch.nn.Module):
             plt.close(fig1)
 
             return {"attention_map": wandb_image, "attention_map_hist": wandb_image1}
+    
+    def create_feature_slot_visualization_wandb_dict(self, data):
+        bs, c, h, w = data.shape
+        denormalized_data = data.cpu() * torch.tensor([0.229, 0.224, 0.255]).view(1, 3, 1, 1) + torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        denormalized_data = (denormalized_data * 255).type(torch.uint8)
+        features = self.feature_extractor.forward_features(data) ## bs, np, dim
+        prj_features = self.mlp_head(features) ## bs, np, dim
+        if self.num_slots != 0:
+            if self.slot_source == "backbone_features":
+                registers, object_prototypes = self.slots(features)
+            elif self.slot_source == "projected_features":
+                registers, object_prototypes = self.slots(prj_features) ## bs, num_slots, dim
+        else:
+            raise NotImplementedError
 
-            
+        normalised_register = registers / registers.norm(dim=-1, keepdim=True)
+        prj_features = prj_features / prj_features.norm(dim=-1, keepdim=True)
+        object_prototypes = object_prototypes / object_prototypes.norm(dim=-1, keepdim=True)
+        if self.use_registers:
+            if self.slot_source == "backbone_features":
+                normalised_features = features / features.norm(dim=-1, keepdim=True)
+            elif self.slot_source == "projected_features":
+                normalised_features = prj_features
+            feature_objprto_sim = torch.einsum("bpd,bhd->bph", normalised_features, normalised_register)
+        else:
+            feature_objprto_sim = torch.einsum("bpd,bhd->bph", prj_features, object_prototypes)
+        cluster_map = feature_objprto_sim.argmax(dim=-1)
+        cluster_map = cluster_map.view(bs, self.feature_extractor.spatial_resolution, self.feature_extractor.spatial_resolution)
+        cluster_map = F.interpolate(cluster_map.unsqueeze(1).float(), size=(h, w), mode="nearest").squeeze(1)
+        _, overlayed_data = overlay_video_cmap(cluster_map.squeeze(1), denormalized_data)
+        wandb_image = wandb.Image(overlayed_data)
+        return {"cluster_map": wandb_image}
 
 
     def validate_step(self, img):
@@ -591,8 +732,8 @@ class TimeTDoRATrainer():
             after_loading_time = time.time()
             print("Loading Time: {}".format(after_loading_time - before_loading_time))
             datum, annotations = batch
-            annotations = annotations.squeeze(1)
-            datum = datum.squeeze(1)
+            # annotations = annotations.squeeze(1)
+            # datum = datum.squeeze(1)
             datum = datum.to(self.device)
             clustering_loss = self.time_tuning_model.train_step(datum)
             total_loss = clustering_loss
@@ -607,15 +748,15 @@ class TimeTDoRATrainer():
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
         epoch_loss /= (i + 1)
-        if epoch_loss < 2.5:
-            self.time_tuning_model.save(f"Temp/model_{epoch_loss}.pth")
+        # if epoch_loss < 2.5:
+        #     self.time_tuning_model.save(f"Temp/model_{epoch_loss}.pth")
         print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
         for epoch in range(self.num_epochs):
             print("Epoch: {}".format(epoch))
-            # if epoch % 4 == 0:
-            #     self.validate(epoch)
+            if epoch % 1 == 0:
+                self.validate(epoch)
             self.train_one_epoch()
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
@@ -634,8 +775,8 @@ class TimeTDoRATrainer():
             for i, (x, y) in enumerate(self.test_dataloader):
                 target = (y * 255).long()
                 img = x.to(self.device)
-                if i <= 10:
-                    self.visualize_attention_heads(img)
+                if i <= 2:
+                    self.visualize_feature_slot_assignment(img)
                 spatial_features = self.time_tuning_model.validate_step(img)  # (B, np, dim)
                 resized_target =  F.interpolate(target.float(), size=(val_spatial_resolution, val_spatial_resolution), mode="nearest").long()
                 targets.append(resized_target)
@@ -703,6 +844,13 @@ class TimeTDoRATrainer():
             visualization_dict = self.time_tuning_model.create_attn_visualization_wandb_dict(data)
             self.logger.log(visualization_dict)
 
+    def visualize_feature_slot_assignment(self, data):
+        self.time_tuning_model.eval()
+        self.time_tuning_model.to(self.device)
+        with torch.no_grad():
+            visualization_dict = self.time_tuning_model.create_feature_slot_visualization_wandb_dict(data)
+            self.logger.log(visualization_dict)
+
 
 
     
@@ -718,12 +866,24 @@ def run(args):
     spatial_resolution = input_size // patch_size
     num_workers = args.num_workers
     mask_ratio = args.mask_ratio
+    num_slots = args.num_slots
+    itr = args.itr
+    use_gru = args.use_gru
+    augmentation = args.augmentation
+    use_kv = args.use_kv
+    wandb_mode = args.wandb
+    dataset_name = args.dataset
+    num_prototypes = args.num_prototypes
+    slot_source = args.slot_source
+    loss = args.loss
+    torch.autograd.set_detect_anomaly(True)
+    experiment_name = f"dataset:{dataset_name}_patch_size:{patch_size}_backbone:{backbone}_slot_source:{slot_source}_use_registers:{use_registers}_num_prototypes:{num_prototypes}_itr:{itr}_use_gru:{use_gru}_use_kv:{use_kv}_num_head:{num_head}_input_size:{input_size}_mask_ratio:{mask_ratio}_num_slots:{num_slots}_augmentation:{augmentation}_loss:{loss}"
     config = vars(args)
     if backbone == "dino_v1":
-        model = MyVisionTransformer(patch_size=patch_size, img_size=[input_size], embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+        model = MyVisionTransformer(patch_size=patch_size, img_size=[input_size], embed_dim=384, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6))
         # model = vit_base(patch_size=patch_size)
-        pretraining = torch.hub.load('facebookresearch/dino:main', f'dino_vitb{patch_size}')
+        pretraining = torch.hub.load('facebookresearch/dino:main', f'dino_vits{patch_size}')
     elif backbone == "vit":
         model = MyVisionTransformer(img_size=[input_size], embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6))
@@ -743,7 +903,7 @@ def run(args):
     today = date.today()
     d1 = today.strftime("%d_%m_%Y")
     project_name = "DoRA_TimeT"
-    logger = wandb.init(project=project_name, mode="disabled", group=d1, job_type="TimeT_DoRA_Coco", name="DINO_v1_b8_abl_mask_with_augmentation", config=config)
+    logger = wandb.init(project=project_name, mode=wandb_mode, group=d1, job_type="TimeT_DoRA_Pascal", name=experiment_name, config=config, dir="/ssdstore/ssalehi/timet_logst")
     ## figure to show the image and each 12 head of the attention map
 
 
@@ -764,7 +924,7 @@ def run(args):
 
     # Construct final transforms
     normalize = trn.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    image_train_transform = trn.Compose([color_transform, trn.Resize((224, 224)), trn.ToTensor(), normalize])
+    image_train_transform = trn.Compose([color_transform, trn.RandomResizedCrop((224, 224), (0.25, 1)), trn.ToTensor(), normalize])
     # image_train_transform = trn.Compose([
     #     trn.ToTensor(),
     #     trn.RandomHorizontalFlip(),
@@ -778,11 +938,15 @@ def run(args):
     ])
 
     train_transforms = {"img": image_train_transform, "target": None, "shared": shared_transform}
-    # train_dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=train_transforms, val_transform=train_transforms, test_transform=train_transforms)
-    train_dataset = CocoDataModule(batch_size=batch_size, train_transform=train_transforms, val_transform=train_transforms, test_transform=train_transforms, img_dir="/ssdstore/ssalehi/coco/train2017", annotation_dir="/ssdstore/ssalehi/coco/annotations/instances_train2017.json", num_workers=num_workers)
+    if dataset_name == "pascal":
+        train_dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=train_transforms, val_transform=train_transforms, test_transform=train_transforms)
+    elif dataset_name == "coco":
+        train_dataset = CocoDataModule(batch_size=batch_size, train_transform=train_transforms, val_transform=train_transforms, test_transform=train_transforms, img_dir="/ssdstore/ssalehi/coco/train2017", annotation_dir="/ssdstore/ssalehi/coco/annotations/instances_train2017.json", num_workers=num_workers)
+    elif dataset_name == "imagenet_100":
+        train_dataset = ImangeNet_100_Handler(batch_size=batch_size, dataset_path="/ssdstore/ssalehi/imagenet-100/imgs", transformations=train_transforms, val_transformations=train_transforms, num_workers=num_workers)
     train_dataset.setup()
     train_dataloader = train_dataset.get_train_dataloader()
-    timet_dora = TimeTDoRA(model, logger=logger, mask_ratio=mask_ratio)
+    timet_dora = TimeTDoRA(model, logger=logger, num_prototypes=num_prototypes, mask_ratio=mask_ratio, itr=itr, use_gru=use_gru, use_kv=use_kv, num_slots=num_slots, loss=loss, use_registers=use_registers, slot_source=slot_source)
     timet_dora = timet_dora.to(device)
     optimization_config = {
         'init_lr': 1e-4,
@@ -807,16 +971,26 @@ def run(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--patch_size', type=int, default=8)
+    parser.add_argument('--patch_size', type=int, default=16)
     parser.add_argument('--backbone', type=str, default="dino_v1")
-    parser.add_argument('--use_registers', type=bool, default=False)
+    parser.add_argument('--use_registers', type=bool, default=True)
     parser.add_argument('--num_head', type=int, default=-1)
     parser.add_argument('--input_size', type=int, default=224)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--num_epochs', type=int, default=100)
+    parser.add_argument('--num_epochs', type=int, default=300)
+    parser.add_argument('--num_prototypes', type=int, default=200)
     parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--mask_ratio', type=float, default=0.8)
-    parser.add_argument('--device', type=str, default="cuda:0")
+    parser.add_argument('--mask_ratio', type=float, default=0.)
+    parser.add_argument('--num_slots', type=int, default=6)
+    parser.add_argument('--dataset', type=str, default="imagenet_100", choices=["pascal", "coco", "imagenet_100"])
+    parser.add_argument('--slot_source', type=str, default="backbone_features")
+    parser.add_argument('--augmentation', type=str, default="everything+crop")
+    parser.add_argument('--loss', type=str, default="global_prototype", choices=["mask_consistency_global_prototype", "mask_consistency", "global_prototype"])
+    parser.add_argument('--use_gru', type=bool, default=True)
+    parser.add_argument('--itr', type=int, default=3)
+    parser.add_argument('--use_kv', type=bool, default=False)
+    parser.add_argument('--device', type=str, default="cuda:6")
+    parser.add_argument('--wandb', type=str, default="online")
     args = parser.parse_args()
     run(args)
    
