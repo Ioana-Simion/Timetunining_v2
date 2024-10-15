@@ -211,16 +211,16 @@ class TimeTuningV2Trainer():
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
         epoch_loss /= (i + 1)
-        if epoch_loss < 2.5:
-            self.time_tuning_model.save(f"Temp/model_{epoch_loss}.pth")
+        # if epoch_loss < 2.5:
+        #     self.time_tuning_model.save(f"Temp/model_{epoch_loss}.pth")
         print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
         for epoch in range(self.num_epochs):
             print("Epoch: {}".format(epoch))
-            self.train_one_epoch()
-            if epoch % 4 == 0:
+            if epoch % 1 == 0:
                 self.validate(epoch)
+            self.train_one_epoch()
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
             # self.validate(epoch)
@@ -317,7 +317,7 @@ def run(args):
     ## make a string of today's date
     today = date.today()
     d1 = today.strftime("%d_%m_%Y")
-    logger = wandb.init(project=project_name, group=d1, job_type='debug_clustering_ytvos', config=config)
+    logger = wandb.init(project=project_name, group=d1, mode="online", job_type='debug_clustering_ytvos', config=config)
     rand_color_jitter = video_transformations.RandomApply([video_transformations.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2)], p=0.8)
     data_transform_list = [rand_color_jitter, video_transformations.RandomGrayscale(), video_transformations.RandomGaussianBlur()]
     data_transform = video_transformations.Compose(data_transform_list)
