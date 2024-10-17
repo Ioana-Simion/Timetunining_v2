@@ -151,12 +151,12 @@ class FCNHead(BaseDecodeHead):
     
 
 class FeatureExtractor(torch.nn.Module):
-    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768):
+    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768, model_type="dino"):
         super().__init__()
         self.model = vit_model
         self.eval_spatial_resolution = eval_spatial_resolution
         self.d_model = d_model
-    
+        self.model_type = model_type
 
     def freeze_feature_extractor(self, unfreeze_layers=[]):
         for name, param in self.model.named_parameters():
@@ -204,13 +204,17 @@ class FeatureExtractor(torch.nn.Module):
         return feats, normalized_cls_attention
     
     def forward_features(self, imgs):
-        try:
-            ## for the backbones that does not support the function
-            features = self.model.get_intermediate_layers(imgs)[0]
-            features = features[:, 1:]
-            normalized_cls_attention = self.model.get_last_selfattention(imgs)
-        except:
-            features = self.model.forward_features(imgs)[:, 1:]
+        if self.model_type == "dino":
+            try:
+                ## for the backbones that does not support the function
+                features = self.model.get_intermediate_layers(imgs)[0]
+                features = features[:, 1:]
+                normalized_cls_attention = self.model.get_last_selfattention(imgs)
+            except:
+                features = self.model.forward_features(imgs)[:, 1:]
+                normalized_cls_attention = None
+        elif self.model_type == "dinov2":
+            features = self.model.forward_features(imgs)["x_norm_patchtokens"]
             normalized_cls_attention = None
         return features, normalized_cls_attention
 
