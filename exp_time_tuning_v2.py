@@ -1,3 +1,4 @@
+
 import argparse
 from datetime import date
 import os
@@ -305,6 +306,11 @@ class TimeTuningV2Trainer():
 
 
 def run(args):
+    import torch
+    print(torch.version.cuda)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print('starting run')
     device = args.device
     ucf101_path = args.ucf101_path
     clip_durations = args.clip_durations
@@ -329,11 +335,15 @@ def run(args):
     num_clips = 1
     num_clip_frames = 4
     regular_step = 1
+    print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
-    prefix = "/ssdstore/ssalehi/dataset"
-    data_path = os.path.join(prefix, "train1/JPEGImages/")
-    annotation_path = os.path.join(prefix, "train1/Annotations/")
-    meta_file_path = os.path.join(prefix, "train1/meta.json")
+    prefix = "/scratch-shared/isimion1/timet"
+    data_path = os.path.join(prefix, "train/JPEGImages")
+    annotation_path = os.path.join(prefix, "train/Annotations")
+    meta_file_path = os.path.join(prefix, "train/meta.json")
+    print(data_path)
+    print(annotation_path)
+    print(meta_file_path)
     path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
     sampling_mode = SamplingMode.DENSE
     video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
@@ -375,7 +385,7 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', type=str, default="cuda:3")
-    parser.add_argument('--ucf101_path', type=str, default="/ssdstore/ssalehi/ucf101/data/UCF101")
+    parser.add_argument('--ucf101_path', type=str, default="/scratch-shared/isimion1/timet/train")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_workers', type=int, default=12)
@@ -389,7 +399,3 @@ if __name__ == "__main__":
     parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
     args = parser.parse_args()
     run(args)
-
-
-
-        

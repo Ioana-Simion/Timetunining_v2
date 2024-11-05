@@ -1,0 +1,24 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu
+#SBATCH --gpus=1
+#SBATCH --job-name=NaviBenchmark
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=18
+#SBATCH --time=04:00:00
+#SBATCH --output=../job_logs/timet_env_install_-%A.out
+
+module purge
+module load 2022
+module load Anaconda3/2022.05
+
+cd $HOME/timet/Timetuning_v2
+export BASE_CACHE_DIR="$SCRATCH_LOCAL/timet/Timetuning_v2"
+export PYTHONPATH= $HOME/timet/Timetuning_v2/:$PYTHONPATH
+# Activate your environment
+
+conda update -n base -c defaults conda
+
+conda clean --all
+conda env create -f environment.yml
+source activate Timetuning

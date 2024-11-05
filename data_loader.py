@@ -560,7 +560,11 @@ class VOCDataset(Dataset):
         else:
             raise ValueError(f"No support for image set {self.image_set}")
         seg_dir = os.path.join(root, seg_folder)
+        print(f'seg dir is {seg_dir}')
         image_dir = os.path.join(root, 'images')
+
+        print(f'img dir is {image_dir}')
+        print(f'root dir is {root}')
         if not os.path.isdir(seg_dir) or not os.path.isdir(image_dir) or not os.path.isdir(root):
             raise RuntimeError('Dataset not found or corrupted.')
         splits_dir = os.path.join(root, 'sets')
@@ -614,7 +618,7 @@ class PascalVOCDataModule():
 
     """
 
-    def __init__(self, batch_size, train_transform, val_transform, test_transform,  dir="/ssdstore/ssalehi/VOCSegmentation", num_workers=0) -> None:
+    def __init__(self, batch_size, train_transform, val_transform, test_transform,  dir="/scratch-shared/isimion1/pascal/VOCSegmentation", num_workers=0) -> None:
         super().__init__()
         self.num_workers = num_workers
         self.batch_size = batch_size
@@ -687,6 +691,10 @@ class VideoDataModule():
         self.rank = rank
         self.sampler = None
         self.data_loader = None
+        print("Class Directory:", self.class_directory)
+        print("Annotations Directory:", self.annotations_directory)
+        print("Meta File Path:", self.meta_file_path)
+
 
     
     def setup(self, transforms_dict):

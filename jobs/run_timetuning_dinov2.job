@@ -1,0 +1,22 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu
+#SBATCH --gpus=1
+#SBATCH --job-name=TimeTDv2
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=18
+#SBATCH --time=58:00:00
+#SBATCH --output=../job_logs/timet_dinov2_-%A.out
+
+module purge
+module load 2022
+module load Anaconda3/2022.05
+
+cd $HOME/timet/Timetuning_v2
+export BASE_CACHE_DIR="$SCRATCH_LOCAL/Timetuning_v2"
+export PYTHONPATH= $HOME/timet/Timetuning_v2/:$PYTHONPATH
+# Activate your environment
+source activate timet
+export CUDA_LAUNCH_BLOCKING=1
+nvcc --version
+python -m exp_time_tuning_v2 --ucf101_path /scratch-shared/isimion1/timet  --model_type dinov2  --device cuda:0
