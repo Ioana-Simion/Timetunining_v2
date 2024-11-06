@@ -171,7 +171,7 @@ class TimeTuningV2Trainer():
         self.num_epochs = num_epochs
         self.logger = logger
         self.logger.watch(time_tuning_model, log="all", log_freq=10)
-        self.best_miou = 0
+        #self.best_miou = 0
     
     def setup_optimizer(self, optimization_config):
         model_params = self.time_tuning_model.get_optimization_params()
@@ -265,10 +265,9 @@ class TimeTuningV2Trainer():
             checkpoint_dir = "checkpoints"
             if not os.path.exists(checkpoint_dir):
                 os.makedirs(checkpoint_dir)
-        
-            # Save checkpoint if mIoU improves
-            if jac > self.best_miou:
-                self.best_miou = jac
+
+            threshold = 0.143
+            if jac > threshold:
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
                 save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}.pth")
                 self.time_tuning_model.save(save_path)
