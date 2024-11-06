@@ -171,7 +171,7 @@ class TimeTuningV2Trainer():
         self.num_epochs = num_epochs
         self.logger = logger
         self.logger.watch(time_tuning_model, log="all", log_freq=10)
-    
+        self.best_miou = 0
     
     def setup_optimizer(self, optimization_config):
         model_params = self.time_tuning_model.get_optimization_params()
@@ -262,12 +262,17 @@ class TimeTuningV2Trainer():
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
             # print(f"Epoch : {epoch}, eval finished, miou: {jac}")
+            checkpoint_dir = "checkpoints"
+            if not os.path.exists(checkpoint_dir):
+                os.makedirs(checkpoint_dir)
         
             # Save checkpoint if mIoU improves
-            if jac > best_miou:
-                best_miou = jac
-                self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                print(f"Model saved with mIoU: {best_miou} at epoch {epoch}")
+            if jac > self.best_miou:
+                self.best_miou = jac
+                #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}.pth")
+                self.time_tuning_model.save(save_path)
+                print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
     
 
     def validate1(self, epoch, val_spatial_resolution=56):
@@ -342,7 +347,7 @@ def run(args):
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
-    prefix = args.prerfix_path
+    prefix = args.prefix_path
     data_path = os.path.join(prefix, "train/JPEGImages")
     annotation_path = os.path.join(prefix, "train/Annotations")
     meta_file_path = os.path.join(prefix, "train/meta.json")
