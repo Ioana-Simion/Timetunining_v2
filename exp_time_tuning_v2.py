@@ -158,7 +158,6 @@ class TimeTuningV2(torch.nn.Module):
     def save(self, path):
         torch.save(self.state_dict(), path)
 
-
         
 
 class TimeTuningV2Trainer():
@@ -263,6 +262,12 @@ class TimeTuningV2Trainer():
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
             # print(f"Epoch : {epoch}, eval finished, miou: {jac}")
+        
+            # Save checkpoint if mIoU improves
+            if jac > best_miou:
+                best_miou = jac
+                self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
+                print(f"Model saved with mIoU: {best_miou} at epoch {epoch}")
     
 
     def validate1(self, epoch, val_spatial_resolution=56):
@@ -337,7 +342,7 @@ def run(args):
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
-    prefix = "/scratch-shared/isimion1/timet"
+    prefix = args.prerfix_path
     data_path = os.path.join(prefix, "train/JPEGImages")
     annotation_path = os.path.join(prefix, "train/Annotations")
     meta_file_path = os.path.join(prefix, "train/meta.json")
@@ -369,7 +374,7 @@ def run(args):
         Resize(size=(input_size, input_size)),
     ])
     val_transforms = {"img": image_val_transform, "target": None , "shared": shared_val_transform}
-    dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, num_workers=num_workers)
+    dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
     patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger)
@@ -385,6 +390,8 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', type=str, default="cuda:3")
+    parser.add_argument('--prefix_path', type=str, default="/scratch-shared/isimion1/timet")
+    parser.add_argument('--pascal_path', type=str, default="/scratch-shared/isimion1/pascal/VOCSegmentation")
     parser.add_argument('--ucf101_path', type=str, default="/scratch-shared/isimion1/timet/train")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=128)
