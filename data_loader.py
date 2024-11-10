@@ -615,8 +615,8 @@ class SPairDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         root,
-        split,
-        image_size=512,
+        split='test',
+        image_size=224,
         image_mean="imagenet",
         use_bbox=True,
         class_name=None,
