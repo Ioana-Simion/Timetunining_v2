@@ -254,7 +254,11 @@ class KeypointMatchingModule():
         errors = (pred_kp[:, None, :] - kps_j[None, :, :2]).norm(p=2, dim=-1)
         errors /= self.threshold
 
-        valid_kps = (kps_i[:, 2] * kps_j[:, 2]) == 1
+        #valid_kps = (kps_i[:, 2] * kps_j[:, 2]) == 1
+        valid_kps = (kps_i[:, 2] * kps_j[:, 2]).unsqueeze(1) == 1
+        print("valid_kps shape:", valid_kps.shape)
+        valid_kps = valid_kps.expand(len(kps_i), len(kps_j))
+        print("valid_kps shape after expand:", valid_kps.shape)
         in_both = valid_kps.diagonal()
         errors[~valid_kps] = 1e3
 
