@@ -20,7 +20,7 @@ import torch.nn.functional as F
 
 import torch
 from einops import einsum
-import tqdm
+from tqdm import tqdm
 
 class LinearFinetune(torch.nn.Module):
     def __init__(self, model, num_classes: int, lr: float, input_size: int, spatial_res: int, val_iters: int,
