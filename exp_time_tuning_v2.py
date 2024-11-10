@@ -174,7 +174,7 @@ class TimeTuningV2Trainer():
         self.best_miou = 0
         self.best_recall = 0
         spair_dataset = SPairDataset(
-            data_root=spair_data_path,
+            root=spair_data_path,
             split="test",
             use_bbox=False,
             image_size=224,
@@ -236,7 +236,7 @@ class TimeTuningV2Trainer():
             # if epoch % 1 == 0:
             #     self.validate(epoch)
 
-            if epoch % 10 == 0:
+            if epoch % 2 == 0:
                 recall = self.keypoint_matching_module.evaluate()
                 self.logger.log({"keypoint_matching_recall": recall})
                 print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")

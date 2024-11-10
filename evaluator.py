@@ -213,7 +213,10 @@ class KeypointMatchingModule():
 
     def compute_errors(self, instance):
         # Compute keypoint matching -- probe 3d logic
-        img_i, mask_i, kps_i, img_j, mask_j, kps_j, _ = instance
+        print(f"Instance has {len(instance)} elements:", instance)
+        # Adjust unpacking based on the actual return structure of instance
+        img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, *rest = instance
+        #img_i, mask_i, kps_i, img_j, mask_j, kps_j, _ = instance
         mask_i = torch.tensor(np.array(mask_i, dtype=float))
         mask_j = torch.tensor(np.array(mask_j, dtype=float))
 
@@ -222,7 +225,9 @@ class KeypointMatchingModule():
         masks = F.avg_pool2d(masks.float(), 16)
         masks = masks > 4 / (16**2)
 
-        feats = self.model(images)
+        #feats = self.model(images)
+        #feats = self.model.forward_features(images)
+        feats, _ = self.model.feature_extractor.forward_features(images)
         feats = F.normalize(feats, p=2, dim=1)
         feats_i = feats[0]
         feats_j = feats[1]
