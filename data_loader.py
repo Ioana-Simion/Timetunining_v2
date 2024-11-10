@@ -33,6 +33,7 @@ from torchvision.datasets import CIFAR10
 from pycocotools.coco import COCO
 from typing import Any, Callable, List, Optional, Tuple
 
+import gzip
 
 project_name = "TimeTuning_v2"
 
@@ -47,6 +48,7 @@ random.seed(1)
 np.random.seed(1)
 torch.manual_seed(1)
 torch.cuda.manual_seed(1)
+from torchvision import transforms
 
 
 
@@ -468,7 +470,355 @@ class VideoDataset(torch.utils.data.Dataset):
         return data, annotations
 
 
+class CO3DDataset(Dataset):
+    def __init__(self, root_directory, subset_name, sampling_mode, num_clips, num_frames,
+                 frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
+        super().__init__()
+        
+        self.root_directory = root_directory
+        self.subset_name = subset_name
+        self.sampling_mode = sampling_mode
+        self.num_clips = num_clips
+        self.num_frames = num_frames
+        self.frame_transform = frame_transform
+        self.target_transform = target_transform
+        self.video_transform = video_transform
+        self.regular_step = regular_step
+        
+        # Load metadata files containing the list of all frames and sequences 
+        # of the given category stored as lists of FrameAnnotation and SequenceAnnotation objects respectivelly
+        self.frame_annotations = self.load_metadata(os.path.join(root_directory, "frame_annotations.jgz"))
+        self.sequence_annotations = self.load_metadata(os.path.join(root_directory, "sequence_annotations.jgz"))
+        
+        self.set_lists = self.load_set_lists(os.path.join(root_directory, "set_lists"))
+        
+        # Load file paths for images and masks
+        self.train_dict = self.get_file_paths()
+        self.train_dict_lengths = {key: len(files) for key, files in self.train_dict.items()}
+        self.keys = list(self.train_dict.keys())
 
+    def load_metadata(self, file_path):
+        # Load metadata from gzipped JSON file
+        if os.path.exists(file_path):
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            print(f"Warning: Metadata file {file_path} not found.")
+            return None
+    
+    def load_set_lists(self, set_list_directory):
+        # Load all set lists (train/val/test splits)
+        set_lists = {}
+        set_list_files = glob.glob(os.path.join(set_list_directory, f"set_lists_{self.subset_name}.json"))
+        for file in set_list_files:
+            with open(file, 'r') as f:
+                set_lists[self.subset_name] = json.load(f)
+        return set_lists
+
+    def get_file_paths(self):
+        # Scans the dataset directory structure and maps paths to image files based on the subset
+        folder_file_path = {}
+        for category in os.listdir(self.root_directory):
+            category_path = os.path.join(self.root_directory, category)
+            if not os.path.isdir(category_path):
+                continue
+            for sequence in os.listdir(category_path):
+                sequence_path = os.path.join(category_path, sequence, "images")
+                if os.path.exists(sequence_path):
+                    files = sorted(glob.glob(sequence_path + "/*.jpg") + glob.glob(sequence_path + "/*.png"))
+                    if files:
+                        folder_file_path[sequence_path] = files
+        return folder_file_path
+    
+    def __len__(self):
+        return len(self.keys)
+
+    def generate_indices(self, size):
+        # Generates indices for sampling based on the specified mode
+        indices = []
+        for _ in range(self.num_clips):
+            if self.sampling_mode == "UNIFORM":
+                idx = random.sample(range(size), self.num_frames) if size >= self.num_frames else random.choices(range(size), k=self.num_frames)
+            elif self.sampling_mode == "DENSE":
+                base = random.randint(0, size - self.num_frames)
+                idx = list(range(base, base + self.num_frames))
+            elif self.sampling_mode == "REGULAR":
+                step = min(self.regular_step, size // self.num_frames) if size >= self.num_frames * self.regular_step else size // self.num_frames
+                idx = list(range(0, size, step))[:self.num_frames]
+            indices.append(idx)
+        return indices
+
+    def read_clips(self, path, clip_indices):
+        # Reads a set of clips at the specified indices
+        clips = []
+        files = self.train_dict[path]
+        for indices in clip_indices:
+            images = [Image.open(files[idx]).convert("RGB") for idx in indices]
+            clips.append(images)
+        return clips
+
+    def get_annotations_for_frame(self, sequence_name, frame_number):
+        # Fetch metadata for a specific frame if available
+        if self.frame_annotations and sequence_name in self.frame_annotations:
+            frames = self.frame_annotations[sequence_name]
+            for frame in frames:
+                if frame['frame_number'] == frame_number:
+                    return frame
+        return None
+
+    def read_batch(self, path, annotation_path=None):
+        # Reads a batch of frames & corresponding annotations
+        size = self.train_dict_lengths[path]
+        clip_indices = self.generate_indices(size)
+        
+        clips = self.read_clips(path, clip_indices)
+        
+        if self.frame_transform:
+            clips = [self.frame_transform(clip) for clip in clips]
+        
+        if self.video_transform:
+            clips = [self.video_transform(clip) for clip in clips]
+        
+        data = torch.stack([torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in clip]) for clip in clips])
+
+        return data, None  # Placeholder for annotations if we aer going to use
+
+    def __getitem__(self, idx):
+        video_path = self.keys[idx]
+        return self.read_batch(video_path)
+
+CLASS_IDS = {
+    "aeroplane": 1,
+    "bicycle": 2,
+    "bird": 3,
+    "boat": 4,
+    "bottle": 5,
+    "bus": 6,
+    "car": 7,
+    "cat": 8,
+    "chair": 9,
+    "cow": 10,
+    "dog": 12,
+    "horse": 13,
+    "motorbike": 14,
+    "person": 15,
+    "pottedplant": 16,
+    "sheep": 17,
+    "train": 19,
+    "tvmonitor": 20,
+}
+
+
+class SPairDataset(torch.utils.data.Dataset):
+    r"""Inherits CorrespondenceDataset"""
+
+    def __init__(
+        self,
+        root,
+        split,
+        image_size=512,
+        image_mean="imagenet",
+        use_bbox=True,
+        class_name=None,
+        num_instances=None,
+        vp_diff=None,
+    ):
+        """
+        Constructs the SPair Dataset loader
+
+        Inputs:
+            root: Dataset root (where SPair is found; kinda odd TODO)
+            thresh: how the threshold is calculated [img, bbox]
+            split: dataset split to be used
+            task: task for this dataset
+        """
+        super().__init__()
+        assert split in ["train", "valid", "test"]
+
+        self.root = root
+        self.split = split
+        self.image_size = image_size
+        self.use_bbox = use_bbox
+
+        if image_mean == "clip":
+            mean = [0.48145466, 0.4578275, 0.40821073]
+            std = [0.26862954, 0.26130258, 0.27577711]
+        elif image_mean == "imagenet":
+            mean = [0.485, 0.456, 0.406]
+            std = [0.229, 0.224, 0.225]
+        else:
+            raise ValueError()
+
+        self.image_transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=transforms.InterpolationMode.BICUBIC,
+                    antialias=True,
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+
+        self.mask_transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=transforms.InterpolationMode.NEAREST,
+                    antialias=True,
+                ),
+                transforms.ToTensor(),
+            ]
+        )
+
+        instances = self.get_pair_annotations()
+
+        if class_name:
+            c_insts = [_a for _a in instances if _a["category"] == class_name]
+            instances = c_insts
+
+        if vp_diff is not None:
+            instances = [_a for _a in instances if _a["viewpoint_variation"] == vp_diff]
+
+        if num_instances:
+            random.seed(20)
+            random.shuffle(instances)
+            instances = instances[:num_instances]
+
+        self.instances = instances
+        self.image_annotations = self.get_image_annotations()
+
+    def process_keypoints(self, kp_dict, bbox, num_kps=None):
+        num_kps = len(kp_dict) if num_kps is None else num_kps
+        all_kps = [(kp_dict[str(i)], i) for i in range(num_kps) if kp_dict[str(i)]]
+        kps_xy = torch.tensor([_xy for _xy, _ in all_kps]).int()
+        kps_id = torch.tensor([_id for _, _id in all_kps]).long()
+
+        if bbox:
+            kps_xy[:, 0] -= bbox[0]
+            kps_xy[:, 1] -= bbox[1]
+
+        # generate full tensor
+        kps = torch.zeros(num_kps, 3).int()
+        kps[kps_id, :2] = kps_xy
+        kps[kps_id, 2] = 1
+
+        return kps
+
+    def __getitem__(self, index, square=True):
+        pair_i = self.instances[index]
+        class_name = pair_i["category"]
+        class_dict = self.image_annotations[class_name]
+        _, view_i, view_j = pair_i["filename"].split(":")[0].split("-")
+
+        # gett bounding boxes
+        bbx_i = pair_i["src_bndbox"] if self.use_bbox else None
+        bbx_j = pair_i["trg_bndbox"] if self.use_bbox else None
+
+        kps_i = self.process_keypoints(class_dict[view_i]["kps"], bbx_i)
+        kps_j = self.process_keypoints(class_dict[view_j]["kps"], bbx_j)
+
+        img_i = self.get_image(class_name, view_i, bbox=bbx_i, square=square)
+        seg_i = self.get_mask(class_name, view_i, bbox=bbx_i, square=square)
+        img_j = self.get_image(class_name, view_j, bbx_j, square=square)
+        seg_j = self.get_mask(class_name, view_j, bbox=bbx_j, square=square)
+
+        # transform image
+        hw_i = img_i.size[0]
+        hw_j = img_j.size[0]
+
+        if not self.use_bbox:
+            l, u, r, d = pair_i["trg_bndbox"]
+            max_bbox = max(r - l, d - u)
+            max_idim = max(pair_i["trg_imsize"][:2])
+            thresh_scale = float(max_bbox) / max_idim
+        else:
+            thresh_scale = 1.0
+
+        # transform images
+        img_i = self.image_transform(img_i)
+        img_j = self.image_transform(img_j)
+        seg_i = self.mask_transform(seg_i)
+        seg_j = self.mask_transform(seg_j)
+        kps_i[:, :2] = kps_i[:, :2] * self.image_size / hw_i
+        kps_j[:, :2] = kps_j[:, :2] * self.image_size / hw_j
+
+        return img_i, seg_i, kps_i, img_j, seg_j, kps_j, thresh_scale, class_name
+
+    def __len__(self):
+        return len(self.instances)
+
+    def get_image(self, class_name, image_name, bbox=None, square=False):
+        rel_path = f"JPEGImages/{class_name}/{image_name}.jpg"
+        path = os.path.join(self.root, rel_path)
+        with Image.open(path) as f:
+            image = np.array(f)
+
+        if bbox:
+            l, u, r, d = bbox
+            # if square:
+            #     max_hw = max(d-u, r-l)
+            #     h, w, _ = image.shape
+            #     d = min(u + max_hw, h)
+            #     r = min(l + max_hw, w)
+
+            image = image[u:d, l:r]
+
+        if square:
+            h, w, _ = image.shape
+            max_hw = max(h, w)
+            image = np.pad(
+                image, ((0, max_hw - h), (0, max_hw - w), (0, 0)), constant_values=255
+            )
+
+        return Image.fromarray(image)
+
+    def get_mask(self, class_name, image_name, bbox=None, square=False):
+        rel_path = f"Segmentation/{class_name}/{image_name}.png"
+        path = os.path.join(self.root, rel_path)
+
+        with Image.open(path) as img:
+            image = np.array(img)
+
+        if bbox:
+            l, u, r, d = bbox
+            image = image[u:d, l:r]
+
+        if square:
+            h, w = image.shape
+            max_hw = max(h, w)
+            image = np.pad(image, ((0, max_hw - h), (0, max_hw - w)))
+
+        # big assumption of no other same class within bbox (or image)
+        class_id = CLASS_IDS[class_name]
+        image = (image == class_id).astype(float) * 255
+
+        return Image.fromarray(image)
+
+    def get_pair_annotations(self):
+        split_names = {"train": "trn", "valid": "val", "test": "test"}
+        split = split_names[self.split]
+
+        annot_path = os.path.join(self.root, "PairAnnotation", split)
+        annot_files = glob.glob(os.path.join(annot_path, "*.json"))
+        annots = [json.load(open(_path)) for _path in annot_files]
+        return annots
+
+    def get_image_annotations(self):
+        annot_path = os.path.join(self.root, "ImageAnnotation")
+        classes = os.listdir(annot_path)
+
+        image_annots = {_c: {} for _c in classes}
+
+        for _cls in classes:
+            annot_files = glob.glob(os.path.join(annot_path, f"{_cls}/*.json"))
+            annots = [json.load(open(_path)) for _path in annot_files]
+            annots = {_a["filename"].split(".")[0]: _a for _a in annots}
+            image_annots[_cls] = annots
+
+        return image_annots
+    
 class YVOSDataset(VideoDataset):
 
     def __init__(self, classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform=None, target_transform=None, video_transform=None, meta_file_directory=None, regular_step=1) -> None:
@@ -691,6 +1041,7 @@ class VideoDataModule():
         self.rank = rank
         self.sampler = None
         self.data_loader = None
+        self.subset_name = "train"
         print("Class Directory:", self.class_directory)
         print("Annotations Directory:", self.annotations_directory)
         print("Meta File Path:", self.meta_file_path)
@@ -707,6 +1058,18 @@ class VideoDataModule():
             self.dataset = YVOSDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         elif self.name == "kinetics":
             self.dataset = Kinetics(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
+        elif self.name == "co3d":
+            self.dataset = CO3DDataset(
+                root_directory=self.class_directory, 
+                subset_name=self.subset_name,  # Define subset as "train", "val", or "test"
+                sampling_mode=self.sampling_mode, 
+                num_clips=self.num_clips, 
+                num_frames=self.num_clip_frames, 
+                frame_transform=data_transforms, 
+                target_transform=target_transforms, 
+                video_transform=shared_transforms, 
+                regular_step=self.regular_step
+            )       
         else:
             self.dataset = VideoDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         print(f"Dataset size : {len(self.dataset)}")

@@ -7,9 +7,9 @@ import torch
 # from pytorchvideo.data import Ucf101, make_clip_sampler
 import torch.nn.functional as F
 from clustering import PerDatasetClustering
-from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule
+from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule, SPairDataset
 from eval_metrics import PredsmIoU
-from evaluator import LinearFinetuneModule
+from evaluator import LinearFinetuneModule, KeypointMatchingModule
 from models import FeatureExtractor, FeatureForwarder
 from my_utils import find_optimal_assignment, denormalize_video
 import wandb
@@ -161,7 +161,7 @@ class TimeTuningV2(torch.nn.Module):
         
 
 class TimeTuningV2Trainer():
-    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger):
+    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_data_path='/home/isimion1/probe3d/data/SPair-71k'):
         self.dataloader = data_module.data_loader
         self.test_dataloader = test_dataloader
         self.time_tuning_model = time_tuning_model
@@ -171,7 +171,19 @@ class TimeTuningV2Trainer():
         self.num_epochs = num_epochs
         self.logger = logger
         self.logger.watch(time_tuning_model, log="all", log_freq=10)
-        #self.best_miou = 0
+        self.best_miou = 0
+        self.best_recall = 0
+        spair_dataset = SPairDataset(
+            data_root=spair_data_path,
+            split="test",
+            use_bbox=False,
+            image_size=224,
+            num_instances=100,  
+            vp_diff=None  
+        )
+    
+        self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
+
     
     def setup_optimizer(self, optimization_config):
         model_params = self.time_tuning_model.get_optimization_params()
@@ -223,6 +235,20 @@ class TimeTuningV2Trainer():
             print("Epoch: {}".format(epoch))
             if epoch % 1 == 0:
                 self.validate(epoch)
+
+            if epoch % 10 == 0:
+                recall = self.keypoint_matching_module.evaluate()
+                self.logger.log({"keypoint_matching_recall": recall})
+                print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
+                if recall > self.best_recall:
+                    self.best_recall = recall
+                    checkpoint_dir = "checkpoints"
+                    if not os.path.exists(checkpoint_dir):
+                        os.makedirs(checkpoint_dir)
+                    save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}.pth")
+                    torch.save(self.time_tuning_model.state_dict(), save_path)
+                    print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
+            
             self.train_one_epoch()
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
@@ -266,8 +292,9 @@ class TimeTuningV2Trainer():
             if not os.path.exists(checkpoint_dir):
                 os.makedirs(checkpoint_dir)
 
-            threshold = 0.143
-            if jac > threshold:
+            #threshold = 0.143
+            if jac > self.best_miou:
+                self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
                 save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}.pth")
                 self.time_tuning_model.save(save_path)
@@ -347,15 +374,24 @@ def run(args):
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
     prefix = args.prefix_path
-    data_path = os.path.join(prefix, "train/JPEGImages")
-    annotation_path = os.path.join(prefix, "train/Annotations")
-    meta_file_path = os.path.join(prefix, "train/meta.json")
+    if args.training_set == 'ytvos':
+
+        data_path = os.path.join(prefix, "train/JPEGImages")
+        annotation_path = os.path.join(prefix, "train/Annotations")
+        meta_file_path = os.path.join(prefix, "train/meta.json")
+    elif args.training_set == 'co3d':
+        data_path = os.path.join(prefix, "train")
+        annotation_path = os.path.join(prefix, "train")
+        meta_file_path = os.path.join(prefix, "train/meta.json")
     print(data_path)
     print(annotation_path)
     print(meta_file_path)
     path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
     sampling_mode = SamplingMode.DENSE
-    video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    if args.training_set == 'ytvos':
+        video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    elif args.training_set == 'co3d':
+        video_data_module = VideoDataModule("co3d", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
     video_data_module.make_data_loader()
 
@@ -396,8 +432,10 @@ if __name__ == "__main__":
     parser.add_argument('--device', type=str, default="cuda:3")
     parser.add_argument('--prefix_path', type=str, default="/scratch-shared/isimion1/timet")
     parser.add_argument('--pascal_path', type=str, default="/scratch-shared/isimion1/pascal/VOCSegmentation")
+    parser.add_argument('--spair_path', type=str, default="/home/isimion1/probe3d/data/SPair-71k")
     parser.add_argument('--ucf101_path', type=str, default="/scratch-shared/isimion1/timet/train")
     parser.add_argument('--clip_durations', type=int, default=2)
+    parser.add_argument('--training_set', type=str, choices=['ytvos', 'co3d'], default='ytvos')
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_workers', type=int, default=12)
     parser.add_argument('--input_size', type=int, default=224)

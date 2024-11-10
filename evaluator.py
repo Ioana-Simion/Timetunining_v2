@@ -18,6 +18,10 @@ from eval_metrics import PredsmIoU
 from clustering import PerDatasetClustering
 import torch.nn.functional as F
 
+import torch
+from einops import einsum
+import tqdm
+
 class LinearFinetune(torch.nn.Module):
     def __init__(self, model, num_classes: int, lr: float, input_size: int, spatial_res: int, val_iters: int,
                  drop_at: int, arch: str, head_type: str = None, decay_rate: float = 0.1, ignore_index: int = 255, device=None):
@@ -177,4 +181,80 @@ class LinearFinetuneModule():
         print('miou_val', round(miou, 6))
         return final_miou
 
+def argmax_2d(x, max_value=True):
+    h, w = x.shape[-2:]
+    x = torch.flatten(x, start_dim=-2)
+    if max_value:
+        flat_indices = x.argmax(dim=-1)
+    else:
+        flat_indices = x.argmin(dim=-1)
 
+    min_row = flat_indices // w
+    min_col = flat_indices % w
+    xy_indices = torch.stack((min_col, min_row), dim=-1)
+    return xy_indices
+
+class KeypointMatchingModule():
+    def __init__(self, model, dataset, device, threshold=0.10):
+        """
+        Initialize the Keypoint Matching Evaluation module.
+        Args:
+            model: The feature extractor model to evaluate.
+            dataset: The SPair dataset for keypoint matching evaluation.
+            device: Device to perform computations on ('cuda' or 'cpu').
+            threshold: Distance threshold for keypoint matching success.
+        """
+        self.model = model
+        self.dataset = dataset
+        self.device = device
+        self.threshold = threshold
+        self.model.to(self.device)
+        self.model.eval()
+
+    def compute_errors(self, instance):
+        # Compute keypoint matching -- probe 3d logic
+        img_i, mask_i, kps_i, img_j, mask_j, kps_j, _ = instance
+        mask_i = torch.tensor(np.array(mask_i, dtype=float))
+        mask_j = torch.tensor(np.array(mask_j, dtype=float))
+
+        images = torch.stack((img_i, img_j)).to(self.device)
+        masks = torch.stack((mask_i, mask_j)).to(self.device)
+        masks = F.avg_pool2d(masks.float(), 16)
+        masks = masks > 4 / (16**2)
+
+        feats = self.model(images)
+        feats = F.normalize(feats, p=2, dim=1)
+        feats_i = feats[0]
+        feats_j = feats[1]
+ 
+        kps_i = kps_i.float() / images.shape[-1]
+        kps_j = kps_j.float() / images.shape[-1]
+
+        kps_i_ndc = (kps_i[:, :2] * 2 - 1).unsqueeze(0).unsqueeze(0).to(self.device)
+        kp_i_F = F.grid_sample(feats_i.unsqueeze(0), kps_i_ndc, mode="bilinear", align_corners=True)[0, :, 0].t()
+
+        heatmaps = einsum(kp_i_F, feats_j, "k f, f h w -> k h w")
+        pred_kp = argmax_2d(heatmaps, max_value=True).float().cpu() / feats.shape[-1]
+
+        errors = (pred_kp[:, None, :] - kps_j[None, :, :2]).norm(p=2, dim=-1)
+        errors /= self.threshold
+
+        valid_kps = (kps_i[:, 2] * kps_j[:, 2]) == 1
+        in_both = valid_kps.diagonal()
+        errors[~valid_kps] = 1e3
+
+        return errors.diagonal()[in_both], errors[in_both].min(dim=1)[0]
+
+    def evaluate(self):
+        """
+        Evaluate the model on keypoint matching over the dataset.
+        Returns:
+            recall: Keypoint matching recall score.
+        """
+        all_errors = []
+        for i in tqdm(range(len(self.dataset)), ncols=60):
+            errors_same, errors_nn = self.compute_errors(self.dataset[i])
+            all_errors.extend(errors_same)
+        
+        recall = (torch.tensor(all_errors) < self.threshold).float().mean().item() * 100.0
+        return recall
