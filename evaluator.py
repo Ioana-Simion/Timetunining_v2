@@ -213,7 +213,7 @@ class KeypointMatchingModule():
 
     def compute_errors(self, instance):
         # Compute keypoint matching -- probe 3d logic
-        print(f"Instance has {len(instance)} elements:", instance)
+        #print(f"Instance has {len(instance)} elements:", instance)
         # Adjust unpacking based on the actual return structure of instance
         img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, *rest = instance
         #img_i, mask_i, kps_i, img_j, mask_j, kps_j, _ = instance
@@ -229,11 +229,11 @@ class KeypointMatchingModule():
         #feats = self.model.forward_features(images)
         feats, _ = self.model.feature_extractor.forward_features(images)
         batch_size, num_patches, channels = feats.shape
-        grid_size = int(num_patches ** 0.5)  # This should be 16 if patches are in a 16x16 grid
+        grid_size = int(num_patches ** 0.5) 
 
         if grid_size ** 2 == num_patches:
             feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
-            print("Reshaped feats shape for grid_sample:", feats.shape)  # Should print [2, 384, 16, 16]
+            #print("Reshaped feats shape for grid_sample:", feats.shape)  # Should be [2, 384, 16, 16]
         else:
             print("Unexpected number of patches, could not reshape.")
 
@@ -245,7 +245,7 @@ class KeypointMatchingModule():
         kps_j = kps_j.float() / images.shape[-1]
         
         kps_i_ndc = (kps_i[:, :2] * 2 - 1).unsqueeze(0).unsqueeze(0).to(self.device)
-        print("kps_i_ndc shape:", kps_i_ndc.shape)  
+        #print("kps_i_ndc shape:", kps_i_ndc.shape)  
         kp_i_F = F.grid_sample(feats_i.unsqueeze(0), kps_i_ndc, mode="bilinear", align_corners=True)[0, :, 0].t()
 
         heatmaps = einsum(kp_i_F, feats_j, "k f, f h w -> k h w")
@@ -256,9 +256,9 @@ class KeypointMatchingModule():
 
         #valid_kps = (kps_i[:, 2] * kps_j[:, 2]) == 1
         valid_kps = (kps_i[:, 2] * kps_j[:, 2]).unsqueeze(1) == 1
-        print("valid_kps shape:", valid_kps.shape)
+        #print("valid_kps shape:", valid_kps.shape)
         valid_kps = valid_kps.expand(len(kps_i), len(kps_j))
-        print("valid_kps shape after expand:", valid_kps.shape)
+        #print("valid_kps shape after expand:", valid_kps.shape)
         in_both = valid_kps.diagonal()
         errors[~valid_kps] = 1e3
 
