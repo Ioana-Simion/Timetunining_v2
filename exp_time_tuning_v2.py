@@ -233,8 +233,8 @@ class TimeTuningV2Trainer():
     def train(self):
         for epoch in range(self.num_epochs):
             print("Epoch: {}".format(epoch))
-            if epoch % 1 == 0:
-                self.validate(epoch)
+            # if epoch % 1 == 0:
+            #     self.validate(epoch)
 
             if epoch % 10 == 0:
                 recall = self.keypoint_matching_module.evaluate()
@@ -248,7 +248,8 @@ class TimeTuningV2Trainer():
                     save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}.pth")
                     torch.save(self.time_tuning_model.state_dict(), save_path)
                     print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
-            
+            else:
+                self.validate(epoch)
             self.train_one_epoch()
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
