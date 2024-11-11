@@ -232,10 +232,13 @@ class KeypointMatchingModule():
 
         feats = F.normalize(feats, p=2, dim=1)
         feats_i, feats_j = feats[0], feats[1]
-
+        print(f'kps_i: {kps_i}')
+        print(f'kps_j: {kps_j}')
         # Normalize keypoints to range [0, 1]
         kps_i = kps_i.float() / images.shape[-1]
         kps_j = kps_j.float() / images.shape[-1]
+        print(f'kps_i after normalization: {kps_i}')
+        print(f'kps_j after normalization: {kps_j}')
 
         # Convert keypoints to normalized device coordinates
         kps_i_ndc = (kps_i[:, :2] * 2 - 1).unsqueeze(0).unsqueeze(0).to(self.device)
@@ -249,7 +252,8 @@ class KeypointMatchingModule():
 
         errors = (pred_kp[:, None, :] - kps_j[None, :, :2]).norm(p=2, dim=-1)
         errors /= (self.threshold + 1e-6)  # ensure no division by zero
-
+        print('kps_i[:, 2] {kps_i[:, 2]}')
+        print('kps_j[:, 2] {kps_j[:, 2]}')
         # Mask valid keypoints
         valid_kps = (kps_i[:, 2] * kps_j[:, 2]).unsqueeze(1) == 1
         valid_kps = valid_kps.expand(len(kps_i), len(kps_j))
