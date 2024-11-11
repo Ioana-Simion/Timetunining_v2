@@ -222,18 +222,16 @@ class KeypointMatchingModule():
         masks = masks > 4 / (16**2)
 
         feats, _ = self.model.feature_extractor.forward_features(images)
-        print(f'feats.shape: {feats.shape}')
         batch_size, num_patches, channels = feats.shape
-
         grid_size = int(num_patches ** 0.5)
+
         if grid_size ** 2 == num_patches:
             feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
         else:
             print(f"Unexpected number of patches ({num_patches}) for reshaping.")
 
         feats = F.normalize(feats, p=2, dim=1)
-        feats_i = feats[0]  # Features for img_i
-        feats_j = feats[1]  # Features for img_j
+        feats_i, feats_j = feats[0], feats[1]
 
         # Normalize keypoints to range [0, 1]
         kps_i = kps_i.float() / images.shape[-1]
@@ -241,7 +239,7 @@ class KeypointMatchingModule():
 
         # Convert keypoints to normalized device coordinates
         kps_i_ndc = (kps_i[:, :2] * 2 - 1).unsqueeze(0).unsqueeze(0).to(self.device)
-        print(f'kps_i_ndc.shape: {kps_i_ndc.shape}')
+
         # Sample features at keypoint locations
         kp_i_F = F.grid_sample(feats_i.unsqueeze(0), kps_i_ndc, mode="bilinear", align_corners=True)[0, :, 0].t()
 
@@ -249,19 +247,20 @@ class KeypointMatchingModule():
         heatmaps = einsum(kp_i_F, feats_j, "k f, f h w -> k h w")
         pred_kp = argmax_2d(heatmaps, max_value=True).float().cpu() / feats.shape[-1]
 
-        # Compute errors
         errors = (pred_kp[:, None, :] - kps_j[None, :, :2]).norm(p=2, dim=-1)
-        errors /= self.threshold
+        errors /= (self.threshold + 1e-6)  # ensure no division by zero
 
         # Mask valid keypoints
         valid_kps = (kps_i[:, 2] * kps_j[:, 2]).unsqueeze(1) == 1
-        print(f'valid_kps.shape: {valid_kps.shape}')
         valid_kps = valid_kps.expand(len(kps_i), len(kps_j))
-        print(f'valid_kps.shape after expand : {valid_kps.shape}')
         in_both = valid_kps.diagonal()
         errors[~valid_kps] = 1e3
 
+        if in_both.sum() == 0:
+            print("Warning: No valid keypoints found in both images.")
+            return torch.tensor([]), torch.tensor([])  
         return errors.diagonal()[in_both], errors[in_both].min(dim=1)[0]
+
 
 
     def evaluate(self):
