@@ -212,11 +212,7 @@ class KeypointMatchingModule():
         self.model.eval()
 
     def compute_errors(self, instance):
-        # Compute keypoint matching -- probe 3d logic
-        #print(f"Instance has {len(instance)} elements:", instance)
-        # Adjust unpacking based on the actual return structure of instance
         img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, *rest = instance
-        #img_i, mask_i, kps_i, img_j, mask_j, kps_j, _ = instance
         mask_i = torch.tensor(np.array(mask_i, dtype=float))
         mask_j = torch.tensor(np.array(mask_j, dtype=float))
 
@@ -225,44 +221,48 @@ class KeypointMatchingModule():
         masks = F.avg_pool2d(masks.float(), 16)
         masks = masks > 4 / (16**2)
 
-        #feats = self.model(images)
-        #feats = self.model.forward_features(images)
         feats, _ = self.model.feature_extractor.forward_features(images)
+        print(f'feats.shape: {feats.shape}')
         batch_size, num_patches, channels = feats.shape
-        grid_size = int(num_patches ** 0.5) 
 
+        grid_size = int(num_patches ** 0.5)
         if grid_size ** 2 == num_patches:
             feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
-            #print("Reshaped feats shape for grid_sample:", feats.shape)  # Should be [2, 384, 16, 16]
         else:
-            print("Unexpected number of patches, could not reshape.")
+            print(f"Unexpected number of patches ({num_patches}) for reshaping.")
 
         feats = F.normalize(feats, p=2, dim=1)
-        feats_i = feats[0]
-        feats_j = feats[1]
- 
+        feats_i = feats[0]  # Features for img_i
+        feats_j = feats[1]  # Features for img_j
+
+        # Normalize keypoints to range [0, 1]
         kps_i = kps_i.float() / images.shape[-1]
         kps_j = kps_j.float() / images.shape[-1]
-        
+
+        # Convert keypoints to normalized device coordinates
         kps_i_ndc = (kps_i[:, :2] * 2 - 1).unsqueeze(0).unsqueeze(0).to(self.device)
-        #print("kps_i_ndc shape:", kps_i_ndc.shape)  
+        print(f'kps_i_ndc.shape: {kps_i_ndc.shape}')
+        # Sample features at keypoint locations
         kp_i_F = F.grid_sample(feats_i.unsqueeze(0), kps_i_ndc, mode="bilinear", align_corners=True)[0, :, 0].t()
 
+        # Compute heatmaps and find corresponding keypoints
         heatmaps = einsum(kp_i_F, feats_j, "k f, f h w -> k h w")
         pred_kp = argmax_2d(heatmaps, max_value=True).float().cpu() / feats.shape[-1]
 
+        # Compute errors
         errors = (pred_kp[:, None, :] - kps_j[None, :, :2]).norm(p=2, dim=-1)
         errors /= self.threshold
 
-        #valid_kps = (kps_i[:, 2] * kps_j[:, 2]) == 1
+        # Mask valid keypoints
         valid_kps = (kps_i[:, 2] * kps_j[:, 2]).unsqueeze(1) == 1
-        #print("valid_kps shape:", valid_kps.shape)
+        print(f'valid_kps.shape: {valid_kps.shape}')
         valid_kps = valid_kps.expand(len(kps_i), len(kps_j))
-        #print("valid_kps shape after expand:", valid_kps.shape)
+        print(f'valid_kps.shape after expand : {valid_kps.shape}')
         in_both = valid_kps.diagonal()
         errors[~valid_kps] = 1e3
 
         return errors.diagonal()[in_both], errors[in_both].min(dim=1)[0]
+
 
     def evaluate(self):
         """
