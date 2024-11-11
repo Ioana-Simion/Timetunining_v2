@@ -7,7 +7,7 @@ import torch
 # from pytorchvideo.data import Ucf101, make_clip_sampler
 import torch.nn.functional as F
 from clustering import PerDatasetClustering
-from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule, SPairDataset
+from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule, SPairDataset, CLASS_IDS
 from eval_metrics import PredsmIoU
 from evaluator import LinearFinetuneModule, KeypointMatchingModule
 from models import FeatureExtractor, FeatureForwarder
@@ -174,14 +174,15 @@ class TimeTuningV2Trainer():
         self.best_miou = 0
         self.best_recall = 0
         spair_dataset = SPairDataset(
-            root=spair_data_path,
-            split="test",
-            use_bbox=False,
-            image_size=224,
-            num_instances=100,  
-            vp_diff=None  
+                root=spair_data_path,
+                split="test",
+                use_bbox=False,
+                image_size=224,
+                image_mean="imagenet",
+                class_name=list(CLASS_IDS.keys()),
+                num_instances=100,
+                vp_diff=None,
         )
-    
         self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
 
     
