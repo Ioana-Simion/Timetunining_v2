@@ -495,7 +495,7 @@ class CO3DDataset(Dataset):
         self.train_dict_lengths = {key: len(files['images']) for key, files in self.train_dict.items()}
         self.keys = list(self.train_dict.keys())
         
-        print("Keys initialized:", self.keys)
+        #print("Keys initialized:", self.keys)
         print("Length of dataset:", len(self.keys))
     
     def organize_zips_by_category(self):
