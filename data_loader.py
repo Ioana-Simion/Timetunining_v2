@@ -564,12 +564,12 @@ class CO3DDataset(Dataset):
     def generate_indices(self, size):
         indices = []
         for _ in range(self.num_clips):
-            if self.sampling_mode == "UNIFORM":
+            if self.sampling_mode == SamplingMode.UNIFORM:
                 idx = random.sample(range(size), self.num_frames) if size >= self.num_frames else random.choices(range(size), k=self.num_frames)
-            elif self.sampling_mode == "DENSE":
+            elif self.sampling_mode == SamplingMode.DENSE:
                 base = random.randint(0, size - self.num_frames)
                 idx = list(range(base, base + self.num_frames))
-            elif self.sampling_mode == "REGULAR":
+            elif self.sampling_mode == SamplingMode.Regular:
                 step = min(self.regular_step, size // self.num_frames) if size >= self.num_frames * self.regular_step else size // self.num_frames
                 idx = list(range(0, size, step))[:self.num_frames]
             indices.append(idx)
