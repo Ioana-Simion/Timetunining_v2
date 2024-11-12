@@ -505,7 +505,7 @@ class CO3DDataset(Dataset):
             if category not in category_zip_map:
                 category_zip_map[category] = []
             category_zip_map[category].append(zip_path)
-        print("Category zip map:", category_zip_map)  
+        #print("Category zip map:", category_zip_map)  
         return category_zip_map
 
     def load_metadata_from_zip(self, zip_file, metadata_filename):
@@ -525,10 +525,10 @@ class CO3DDataset(Dataset):
             sequence_annotations = None
 
             for zip_file in zip_files:
-                print(f"Processing zip file: {zip_file}")  
+                #print(f"Processing zip file: {zip_file}")  
                 with ZipFile(zip_file, 'r') as z:
                     zip_contents = z.namelist()
-                    print(f"Contents of {zip_file}:", zip_contents)
+                    #print(f"Contents of {zip_file}:", zip_contents)
                     
                     # Collect images
                     images.extend([f for f in zip_contents if f.startswith("images/") and f.endswith((".jpg", ".png"))])
