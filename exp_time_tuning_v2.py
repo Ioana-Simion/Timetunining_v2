@@ -68,6 +68,7 @@ class TimeTuningV2(torch.nn.Module):
         prototype_init = torch.randn((num_prototypes, 256))
         prototype_init =  F.normalize(prototype_init, dim=-1, p=2)  
         self.prototypes = torch.nn.Parameter(prototype_init)
+        self.model_type = model_type
     
 
     def normalize_prototypes(self):
@@ -299,7 +300,7 @@ class TimeTuningV2Trainer():
             if jac > self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
     
