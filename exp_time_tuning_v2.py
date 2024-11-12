@@ -440,6 +440,7 @@ if __name__ == "__main__":
     parser.add_argument('--ucf101_path', type=str, default="/scratch-shared/isimion1/timet/train")
     parser.add_argument('--clip_durations', type=int, default=2)
     parser.add_argument('--training_set', type=str, choices=['ytvos', 'co3d'], default='ytvos')
+    parser.add_argument('--spair_val', type=float, default=False)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_workers', type=int, default=12)
     parser.add_argument('--input_size', type=int, default=224)

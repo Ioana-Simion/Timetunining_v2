@@ -494,21 +494,21 @@ class CO3DDataset(Dataset):
         self.train_dict = self.get_file_paths_from_zips()
         self.train_dict_lengths = {key: len(files['images']) for key, files in self.train_dict.items()}
         self.keys = list(self.train_dict.keys())
+        
+        print("Keys initialized:", self.keys)
+        print("Length of dataset:", len(self.keys))
     
     def organize_zips_by_category(self):
-        # Group zip files by category (e.g., "apple" or "bicycle")
-        # classes have different number of zip files
         category_zip_map = {}
         for zip_path in glob.glob(os.path.join(self.root_directory, "*.zip")):
             category = os.path.basename(zip_path).split("_")[0]
             if category not in category_zip_map:
                 category_zip_map[category] = []
             category_zip_map[category].append(zip_path)
+        print("Category zip map:", category_zip_map)  
         return category_zip_map
 
     def load_metadata_from_zip(self, zip_file, metadata_filename):
-        # Load metadata files containing the list of all frames and sequences 
-        # of the given category stored as lists of FrameAnnotation and SequenceAnnotation objects respectivelly
         with ZipFile(zip_file, 'r') as z:
             if metadata_filename in z.namelist():
                 with z.open(metadata_filename) as f:
@@ -517,7 +517,6 @@ class CO3DDataset(Dataset):
         return None
 
     def get_file_paths_from_zips(self):
-        # Get images and annotations across multiple zip files per category
         folder_file_path = {}
         
         for category, zip_files in self.category_zip_map.items():
@@ -526,9 +525,13 @@ class CO3DDataset(Dataset):
             sequence_annotations = None
 
             for zip_file in zip_files:
+                print(f"Processing zip file: {zip_file}")  
                 with ZipFile(zip_file, 'r') as z:
+                    zip_contents = z.namelist()
+                    print(f"Contents of {zip_file}:", zip_contents)
+                    
                     # Collect images
-                    images.extend([f for f in z.namelist() if f.startswith("images/") and f.endswith((".jpg", ".png"))])
+                    images.extend([f for f in zip_contents if f.startswith("images/") and f.endswith((".jpg", ".png"))])
                     
                     # Load annotations if not already loaded
                     if frame_annotations is None:
@@ -543,16 +546,18 @@ class CO3DDataset(Dataset):
                     'images': images,
                     'frame_annotations': frame_annotations,
                     'sequence_annotations': sequence_annotations,
-                    'zip_files': zip_files  # Keep track of zip files to load data from
+                    'zip_files': zip_files
                 }
+            else:
+                print(f"Warning: No images found for category {category}")
                 
+        print("Train dictionary contents:", folder_file_path) 
         return folder_file_path
 
     def __len__(self):
         return len(self.keys)
 
     def generate_indices(self, size):
-        # Generates indices for sampling based on the specified mode
         indices = []
         for _ in range(self.num_clips):
             if self.sampling_mode == "UNIFORM":
@@ -1092,6 +1097,7 @@ class VideoDataModule():
         elif self.name == "kinetics":
             self.dataset = Kinetics(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         elif self.name == "co3d":
+            print('using CO3D dataset')
             self.dataset = CO3DDataset(
                 root_directory=self.class_directory, 
                 subset_name=self.subset_name,  # Define subset as "train", "val", or "test"
