@@ -379,7 +379,6 @@ def run(args):
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
     prefix = args.prefix_path
     if args.training_set == 'ytvos':
-
         data_path = os.path.join(prefix, "train/JPEGImages")
         annotation_path = os.path.join(prefix, "train/Annotations")
         meta_file_path = os.path.join(prefix, "train/meta.json")
