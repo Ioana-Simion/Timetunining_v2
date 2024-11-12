@@ -33,6 +33,8 @@ from torchvision.datasets import CIFAR10
 from pycocotools.coco import COCO
 from typing import Any, Callable, List, Optional, Tuple
 
+from zipfile import ZipFile
+
 import gzip
 
 project_name = "TimeTuning_v2"
@@ -484,7 +486,7 @@ class CO3DDataset(Dataset):
         self.target_transform = target_transform
         self.video_transform = video_transform
         self.regular_step = regular_step
-        
+
         # Load metadata files containing the list of all frames and sequences 
         # of the given category stored as lists of FrameAnnotation and SequenceAnnotation objects respectivelly
         self.frame_annotations = self.load_metadata(os.path.join(root_directory, "frame_annotations.jgz"))
@@ -492,8 +494,8 @@ class CO3DDataset(Dataset):
         
         self.set_lists = self.load_set_lists(os.path.join(root_directory, "set_lists"))
         
-        # Load file paths for images and masks
-        self.train_dict = self.get_file_paths()
+        # Load file paths for images and masks from zip files
+        self.train_dict = self.get_file_paths_from_zip()
         self.train_dict_lengths = {key: len(files) for key, files in self.train_dict.items()}
         self.keys = list(self.train_dict.keys())
 
@@ -507,7 +509,6 @@ class CO3DDataset(Dataset):
             return None
     
     def load_set_lists(self, set_list_directory):
-        # Load all set lists (train/val/test splits)
         set_lists = {}
         set_list_files = glob.glob(os.path.join(set_list_directory, f"set_lists_{self.subset_name}.json"))
         for file in set_list_files:
@@ -515,21 +516,16 @@ class CO3DDataset(Dataset):
                 set_lists[self.subset_name] = json.load(f)
         return set_lists
 
-    def get_file_paths(self):
-        # Scans the dataset directory structure and maps paths to image files based on the subset
+    def get_file_paths_from_zip(self):
+        # Scan through zip files in root_directory and map paths to image files inside each zip
         folder_file_path = {}
-        for category in os.listdir(self.root_directory):
-            category_path = os.path.join(self.root_directory, category)
-            if not os.path.isdir(category_path):
-                continue
-            for sequence in os.listdir(category_path):
-                sequence_path = os.path.join(category_path, sequence, "images")
-                if os.path.exists(sequence_path):
-                    files = sorted(glob.glob(sequence_path + "/*.jpg") + glob.glob(sequence_path + "/*.png"))
-                    if files:
-                        folder_file_path[sequence_path] = files
+        for zip_file in glob.glob(os.path.join(self.root_directory, "*.zip")):
+            with ZipFile(zip_file, 'r') as z:
+                image_files = sorted([f for f in z.namelist() if f.startswith("images/") and f.endswith((".jpg", ".png"))])
+                if image_files:
+                    folder_file_path[zip_file] = image_files
         return folder_file_path
-    
+
     def __len__(self):
         return len(self.keys)
 
@@ -548,13 +544,13 @@ class CO3DDataset(Dataset):
             indices.append(idx)
         return indices
 
-    def read_clips(self, path, clip_indices):
-        # Reads a set of clips at the specified indices
+    def read_clips(self, zip_file, clip_indices):
         clips = []
-        files = self.train_dict[path]
-        for indices in clip_indices:
-            images = [Image.open(files[idx]).convert("RGB") for idx in indices]
-            clips.append(images)
+        with ZipFile(zip_file, 'r') as z:
+            files = self.train_dict[zip_file]
+            for indices in clip_indices:
+                images = [Image.open(z.open(files[idx])).convert("RGB") for idx in indices]
+                clips.append(images)
         return clips
 
     def get_annotations_for_frame(self, sequence_name, frame_number):
@@ -566,12 +562,12 @@ class CO3DDataset(Dataset):
                     return frame
         return None
 
-    def read_batch(self, path, annotation_path=None):
+    def read_batch(self, zip_file, annotation_path=None):
         # Reads a batch of frames & corresponding annotations
-        size = self.train_dict_lengths[path]
+        size = self.train_dict_lengths[zip_file]
         clip_indices = self.generate_indices(size)
         
-        clips = self.read_clips(path, clip_indices)
+        clips = self.read_clips(zip_file, clip_indices)
         
         if self.frame_transform:
             clips = [self.frame_transform(clip) for clip in clips]
@@ -581,11 +577,11 @@ class CO3DDataset(Dataset):
         
         data = torch.stack([torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in clip]) for clip in clips])
 
-        return data, None  # Placeholder for annotations if we aer going to use
+        return data, None 
 
     def __getitem__(self, idx):
-        video_path = self.keys[idx]
-        return self.read_batch(video_path)
+        zip_file = self.keys[idx]
+        return self.read_batch(zip_file)
 
 CLASS_IDS = {
     "aeroplane": 1,

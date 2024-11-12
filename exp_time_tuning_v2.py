@@ -173,17 +173,17 @@ class TimeTuningV2Trainer():
         self.logger.watch(time_tuning_model, log="all", log_freq=10)
         self.best_miou = 0
         self.best_recall = 0
-        spair_dataset = SPairDataset(
-                root=spair_data_path,
-                split="test",
-                use_bbox=False,
-                image_size=224,
-                image_mean="imagenet",
-                class_name=list(CLASS_IDS.keys()),
-                num_instances=100,
-                vp_diff=None,
-        )
-        self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
+        # spair_dataset = SPairDataset(
+        #         root=spair_data_path,
+        #         split="test",
+        #         use_bbox=False,
+        #         image_size=224,
+        #         image_mean="imagenet",
+        #         class_name=list(CLASS_IDS.keys()),
+        #         num_instances=100,
+        #         vp_diff=None,
+        # )
+        # self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
 
     
     def setup_optimizer(self, optimization_config):
@@ -238,17 +238,18 @@ class TimeTuningV2Trainer():
             #     self.validate(epoch)
 
             if epoch % 2 == 0:
-                recall = self.keypoint_matching_module.evaluate()
-                self.logger.log({"keypoint_matching_recall": recall})
-                print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
-                if recall > self.best_recall:
-                    self.best_recall = recall
-                    checkpoint_dir = "checkpoints"
-                    if not os.path.exists(checkpoint_dir):
-                        os.makedirs(checkpoint_dir)
-                    save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}.pth")
-                    torch.save(self.time_tuning_model.state_dict(), save_path)
-                    print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
+                # recall = self.keypoint_matching_module.evaluate()
+                # self.logger.log({"keypoint_matching_recall": recall})
+                # print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
+                # if recall > self.best_recall:
+                #     self.best_recall = recall
+                #     checkpoint_dir = "checkpoints"
+                #     if not os.path.exists(checkpoint_dir):
+                #         os.makedirs(checkpoint_dir)
+                #     save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}.pth")
+                #     torch.save(self.time_tuning_model.state_dict(), save_path)
+                #     print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
+                self.validate(epoch)
             else:
                 self.validate(epoch)
             self.train_one_epoch()
@@ -382,9 +383,9 @@ def run(args):
         annotation_path = os.path.join(prefix, "train/Annotations")
         meta_file_path = os.path.join(prefix, "train/meta.json")
     elif args.training_set == 'co3d':
-        data_path = os.path.join(prefix, "train")
-        annotation_path = os.path.join(prefix, "train")
-        meta_file_path = os.path.join(prefix, "train/meta.json")
+        data_path = os.path.join(prefix, "zips")
+        annotation_path = os.path.join(prefix, "zips")
+        meta_file_path = os.path.join(prefix, "zips")
     print(data_path)
     print(annotation_path)
     print(meta_file_path)
@@ -432,7 +433,8 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', type=str, default="cuda:3")
-    parser.add_argument('--prefix_path', type=str, default="/scratch-shared/isimion1/timet")
+    #parser.add_argument('--prefix_path', type=str, default="/scratch-shared/isimion1/timet")
+    parser.add_argument('--prefix_path', type=str, default="/projects/2/managed_datasets/co3d/")
     parser.add_argument('--pascal_path', type=str, default="/scratch-shared/isimion1/pascal/VOCSegmentation")
     parser.add_argument('--spair_path', type=str, default="/home/isimion1/probe3d/data/SPair-71k")
     parser.add_argument('--ucf101_path', type=str, default="/scratch-shared/isimion1/timet/train")
