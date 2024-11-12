@@ -517,22 +517,26 @@ class CO3DDataset(Dataset):
         return None
 
     def get_file_paths_from_zips(self):
+        # Get images and annotations across multiple zip files per category
         folder_file_path = {}
-        
+
         for category, zip_files in self.category_zip_map.items():
             images = []
             frame_annotations = None
             sequence_annotations = None
 
             for zip_file in zip_files:
-                #print(f"Processing zip file: {zip_file}")  
                 with ZipFile(zip_file, 'r') as z:
-                    zip_contents = z.namelist()
-                    #print(f"Contents of {zip_file}:", zip_contents)
-                    
-                    # Collect images
-                    images.extend([f for f in zip_contents if f.startswith("images/") and f.endswith((".jpg", ".png"))])
-                    
+                    # Collect images - specifically from the "images/" directory
+                    all_files = z.namelist()
+                    img_files = [f for f in all_files if f.startswith(f"{category}/") and "images/" in f and f.endswith((".jpg", ".png"))]
+
+                    # Debug print to ensure we are capturing the intended paths
+                    #print(f"Images found in {zip_file}: {img_files}")
+
+                    if img_files:
+                        images.extend(img_files)
+
                     # Load annotations if not already loaded
                     if frame_annotations is None:
                         frame_annotations = self.load_metadata_from_zip(zip_file, "frame_annotations.jgz")
@@ -546,11 +550,11 @@ class CO3DDataset(Dataset):
                     'images': images,
                     'frame_annotations': frame_annotations,
                     'sequence_annotations': sequence_annotations,
-                    'zip_files': zip_files
+                    'zip_files': zip_files  # Keep track of zip files to load data from
                 }
             else:
                 print(f"Warning: No images found for category {category}")
-                
+
         print("Train dictionary contents:", folder_file_path) 
         return folder_file_path
 
