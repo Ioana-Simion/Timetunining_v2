@@ -555,7 +555,7 @@ class CO3DDataset(Dataset):
             else:
                 print(f"Warning: No images found for category {category}")
 
-        print("Train dictionary contents:", folder_file_path) 
+        #print("Train dictionary contents:", folder_file_path) 
         return folder_file_path
 
     def __len__(self):
