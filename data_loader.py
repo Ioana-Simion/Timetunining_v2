@@ -484,7 +484,7 @@ def load_mapping(filepath="zip_mapping.json"):
 
 from collections import defaultdict
 
-def locate_and_load_set_lists(root_directory, zip_mapping_path):
+def locate_and_load_set_lists(zip_mapping_path):
     # Load existing zip mapping
     with open(zip_mapping_path, 'r') as f:
         zip_mapping = json.load(f)
