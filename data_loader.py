@@ -638,15 +638,26 @@ class CO3DDataset(Dataset):
 
         return data, None 
 
+   
     def __getitem__(self, idx):
         category = self.keys[idx]
-        data, annotations = self.read_batch(category)
+        try:
+            data, annotations = self.read_batch(category)
+            
+            if data is None:
+                raise ValueError(f"No valid data for category {category} at index {idx}.")
+            
+            return data, annotations
 
-        # Skip if no valid data is returned
-        if data is None:
-            raise ValueError(f"No valid data found for category {category} at index {idx}. Skipping.")
+        except Exception as e:
+            print(f"Skipping invalid sample for category {category} at index {idx} due to: {e}")
+            
+            # Return a dummy tensor of the correct shape or any valid sample in place of invalid ones
+            dummy_shape = (self.num_frames, 3, 224, 224)  
+            dummy_data = torch.zeros(dummy_shape)  
+            dummy_annotations = {}  
+            return dummy_data, dummy_annotations
 
-        return data, annotations
 
 
 CLASS_IDS = {
@@ -1140,9 +1151,9 @@ class VideoDataModule():
     def make_data_loader(self, shuffle=True):
         if self.world_size > 1:
             self.sampler = DistributedSampler(self.dataset, num_replicas=self.world_size, rank=self.rank, shuffle=shuffle)
-            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, sampler=self.sampler)
+            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, sampler=self.sampler, drop_last=True)
         else:
-            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=True)
+            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=True, drop_last=True)
     
     def get_data_loader(self):
         return self.data_loader
