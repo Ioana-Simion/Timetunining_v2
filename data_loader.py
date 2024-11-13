@@ -583,17 +583,23 @@ class CO3DDataset(Dataset):
         for indices in clip_indices:
             images = []
             for idx in indices:
+                img_path = image_paths[idx]
                 try:
-                    img_path = image_paths[idx]
-                    if img_path not in current_zip.namelist():
-                        # Switch zip file if image not in current one
+                    # Switch zip file if needed & not found in current zip
+                    while img_path not in current_zip.namelist():
                         current_zip = ZipFile(next(zip_file_iters), 'r')
+                    
+                    # Attempt to load image
                     images.append(Image.open(current_zip.open(img_path)).convert("RGB"))
-                except StopIteration:
-                    print("Warning: Not enough zip files to cover all indices.")
-                    break
-            clips.append(images)
-        
+                except (KeyError, StopIteration):
+                    print(f"Warning: File {img_path} not found in any zip file. Skipping.")
+                    continue  # Silently skip for now
+
+            if images:
+                clips.append(images)
+            else:
+                print(f"Warning: No images found for the clip at index {indices}. Skipping this clip.")
+
         return clips
 
     def get_annotations_for_frame(self, category, frame_number):
