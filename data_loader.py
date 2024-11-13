@@ -535,8 +535,9 @@ def locate_and_load_set_lists(root_directory, zip_mapping_path):
     
 
 class CO3DDataset(Dataset):
+
     def __init__(self, root_directory, subset_name, sampling_mode, num_clips, num_frames,
-                 frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
+             frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
         super().__init__()
         self.root_directory = root_directory
         self.subset_name = subset_name
@@ -548,27 +549,26 @@ class CO3DDataset(Dataset):
         self.video_transform = video_transform
         self.regular_step = regular_step
 
-        # Load existing mapping or create a new one
-        #mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+        # Load the precomputed detailed mapping
         mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
-        self.data = load_mapping(mapping_path)
-        if self.data is None:
+        self.category_data = load_mapping(mapping_path)
+        if self.category_data is None:
             print("Creating detailed mapping for the first time...")
-            self.data = locate_and_load_set_lists(root_directory)
+            self.category_data = locate_and_load_set_lists(root_directory)
             save_mapping(self.data, mapping_path)
         else:
+            
             print("Loaded existing detailed mapping.")
 
+        # Flatten the mapping to create sequences and frames lists
         self.sequences = [
-            (category, sequence, frames)
-            for category, seq_data in self.data.items()
+            {"category": category, "sequence": sequence, "frames": frames}
+            for category, seq_data in self.category_data.items()
             for sequence, frames in seq_data.items()
         ]
-        # self.train_dict = self.get_file_paths_from_zips()
-        # self.keys = list(self.train_dict.keys())
-        
-        # #print("Keys initialized:", self.keys)
-        # print("Length of dataset:", len(self.keys))
+
+        print("Number of sequences:", len(self.sequences))
+
     
     def organize_zips_by_category(self):
         category_zip_map = {}
