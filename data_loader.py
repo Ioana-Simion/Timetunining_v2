@@ -551,11 +551,12 @@ class CO3DDataset(Dataset):
 
         # Load the precomputed detailed mapping
         mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
-        self.category_data = load_mapping(mapping_path)
+        detailed_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+        self.category_data = load_mapping(detailed_mapping_path)
         if self.category_data is None:
             print("Creating detailed mapping for the first time...")
             self.category_data = locate_and_load_set_lists(root_directory)
-            save_mapping(self.data, mapping_path)
+            save_mapping(self.category_data, mapping_path)
         else:
             
             print("Loaded existing detailed mapping.")
