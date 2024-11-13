@@ -484,10 +484,36 @@ def load_mapping(filepath="zip_mapping.json"):
 
 from collections import defaultdict
 
-def locate_and_load_set_lists(zip_mapping_path):
+def generate_zip_mapping(root_directory, zip_mapping_path):
+    """Generates the zip_mapping.json by organizing zip files by category and saving the mapping."""
+    category_zip_map = defaultdict(list)
+    # Scan for zip files in the root directory and organize by category
+    for zip_path in glob.glob(os.path.join(root_directory, "*.zip")):
+        category = os.path.basename(zip_path).split("_")[0]
+        category_zip_map[category].append(zip_path)
+    
+    # Save the mapping to a JSON file
+    with open(zip_mapping_path, 'w') as f:
+        json.dump(category_zip_map, f, indent=4)
+    print(f"Zip mapping saved at {zip_mapping_path}")
+
+def locate_and_load_set_lists(root_directory, zip_mapping_path):
     # Load existing zip mapping
     with open(zip_mapping_path, 'r') as f:
         zip_mapping = json.load(f)
+
+    if os.path.isfile(zip_mapping_path):
+        with open(zip_mapping_path, 'r') as f:
+            zip_mapping = json.load(f)
+        print(f"Loaded zip mapping from {zip_mapping_path}")
+    else:
+        print("zip_mapping.json not found. Creating a new mapping...")
+        generate_zip_mapping(root_directory, zip_mapping_path)
+        
+        # Load the newly created mapping
+        with open(zip_mapping_path, 'r') as f:
+            zip_mapping = json.load(f)
+
 
     category_data = defaultdict(dict)
 
@@ -555,10 +581,9 @@ class CO3DDataset(Dataset):
         self.category_data = load_mapping(detailed_mapping_path)
         if self.category_data is None:
             print("Creating detailed mapping for the first time...")
-            self.category_data = locate_and_load_set_lists(mapping_path)
-            save_mapping(self.category_data, mapping_path)
+            self.category_data = locate_and_load_set_lists(self.root_directory, mapping_path)
+            save_mapping(self.category_data, detailed_mapping_path)
         else:
-            
             print("Loaded existing detailed mapping.")
 
         # Flatten the mapping to create sequences and frames lists
