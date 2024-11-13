@@ -162,7 +162,7 @@ class TimeTuningV2(torch.nn.Module):
         
 
 class TimeTuningV2Trainer():
-    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_data_path='/home/isimion1/probe3d/data/SPair-71k'):
+    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_data_path='/home/isimion1/probe3d/data/SPair-71k', spair_val=False):
         self.dataloader = data_module.data_loader
         self.test_dataloader = test_dataloader
         self.time_tuning_model = time_tuning_model
@@ -174,17 +174,19 @@ class TimeTuningV2Trainer():
         self.logger.watch(time_tuning_model, log="all", log_freq=10)
         self.best_miou = 0
         self.best_recall = 0
-        # spair_dataset = SPairDataset(
-        #         root=spair_data_path,
-        #         split="test",
-        #         use_bbox=False,
-        #         image_size=224,
-        #         image_mean="imagenet",
-        #         class_name=list(CLASS_IDS.keys()),
-        #         num_instances=100,
-        #         vp_diff=None,
-        # )
-        # self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
+        self.spair_val = spair_val
+        if self.spair_val:
+            spair_dataset = SPairDataset(
+                    root=spair_data_path,
+                    split="test",
+                    use_bbox=False,
+                    image_size=224,
+                    image_mean="imagenet",
+                    class_name=list(CLASS_IDS.keys()),
+                    num_instances=100,
+                    vp_diff=None,
+            )
+            self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
 
     
     def setup_optimizer(self, optimization_config):
@@ -237,20 +239,21 @@ class TimeTuningV2Trainer():
             print("Epoch: {}".format(epoch))
             # if epoch % 1 == 0:
             #     self.validate(epoch)
-
-            if epoch % 2 == 0:
-                # recall = self.keypoint_matching_module.evaluate()
-                # self.logger.log({"keypoint_matching_recall": recall})
-                # print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
-                # if recall > self.best_recall:
-                #     self.best_recall = recall
-                #     checkpoint_dir = "checkpoints"
-                #     if not os.path.exists(checkpoint_dir):
-                #         os.makedirs(checkpoint_dir)
-                #     save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}.pth")
-                #     torch.save(self.time_tuning_model.state_dict(), save_path)
-                #     print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
-                self.validate(epoch)
+            if self.spair_val:
+                if epoch % 2 == 0: # 2 only for debuggingt then we do evey 10/20
+                    recall = self.keypoint_matching_module.evaluate()
+                    self.logger.log({"keypoint_matching_recall": recall})
+                    print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
+                    if recall > self.best_recall:
+                        self.best_recall = recall
+                        checkpoint_dir = "checkpoints"
+                        if not os.path.exists(checkpoint_dir):
+                            os.makedirs(checkpoint_dir)
+                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}.pth")
+                        torch.save(self.time_tuning_model.state_dict(), save_path)
+                        print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
+                else:
+                    self.validate(epoch)
             else:
                 self.validate(epoch)
             self.train_one_epoch()
@@ -420,7 +423,8 @@ def run(args):
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger)
+    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_data_path=
+                                                   args.spair_path, spair_val=args.spair_val)
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 

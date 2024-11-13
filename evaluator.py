@@ -213,6 +213,8 @@ class KeypointMatchingModule():
 
     def compute_errors(self, instance):
         img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, *rest = instance
+        print(f'img_i shape: {img_i.shape}')
+        print(f'img_j shape: {img_j.shape}')
         mask_i = torch.tensor(np.array(mask_i, dtype=float))
         mask_j = torch.tensor(np.array(mask_j, dtype=float))
 
@@ -222,6 +224,7 @@ class KeypointMatchingModule():
         masks = masks > 4 / (16**2)
 
         feats, _ = self.model.feature_extractor.forward_features(images)
+        print(f'feats shape: {feats.shape}')
         batch_size, num_patches, channels = feats.shape
         grid_size = int(num_patches ** 0.5)
 
