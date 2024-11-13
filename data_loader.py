@@ -823,6 +823,7 @@ class SPairDataset(torch.utils.data.Dataset):
         )
 
         instances = self.get_pair_annotations()
+        print(f'instances: {instances}')
 
         if class_name:
             c_insts = [_a for _a in instances if _a["category"] == class_name]
@@ -1231,9 +1232,9 @@ class VideoDataModule():
     def make_data_loader(self, shuffle=True):
         if self.world_size > 1:
             self.sampler = DistributedSampler(self.dataset, num_replicas=self.world_size, rank=self.rank, shuffle=shuffle)
-            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, sampler=self.sampler, drop_last=True)
+            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True, sampler=self.sampler)
         else:
-            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=True, drop_last=True)
+            self.data_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=shuffle, num_workers=self.num_workers, pin_memory=True)
     
     def get_data_loader(self):
         return self.data_loader
