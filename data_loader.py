@@ -555,7 +555,7 @@ class CO3DDataset(Dataset):
         self.category_data = load_mapping(detailed_mapping_path)
         if self.category_data is None:
             print("Creating detailed mapping for the first time...")
-            self.category_data = locate_and_load_set_lists(root_directory)
+            self.category_data = locate_and_load_set_lists(mapping_path)
             save_mapping(self.category_data, mapping_path)
         else:
             
