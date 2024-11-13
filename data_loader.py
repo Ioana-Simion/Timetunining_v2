@@ -484,32 +484,53 @@ def load_mapping(filepath="zip_mapping.json"):
 
 from collections import defaultdict
 
-def locate_and_load_set_lists(root_directory):
-    category_data = defaultdict(dict)
-    
-    for zip_path in glob.glob(os.path.join(root_directory, "*.zip")):
-        category = os.path.basename(zip_path).split("_")[0]
-        print(f"Processing zip file for category '{category}': {zip_path}")
+def locate_and_load_set_lists(root_directory, zip_mapping_path):
+    # Load existing zip mapping
+    with open(zip_mapping_path, 'r') as f:
+        zip_mapping = json.load(f)
 
-        with ZipFile(zip_path, 'r') as z:
-            # Try to locate the set_lists.json
-            set_list_files = [f for f in z.namelist() if "set_lists.json" in f]
-            if set_list_files:
-                with z.open(set_list_files[0]) as f:
-                    print(f"Found set_lists.json in {zip_path}")
-                    data = json.load(f)
-                    if "train_known" in data:
-                        for entry in data["train_known"]:
-                            sequence, frame_idx, img_path = entry
-                            if sequence not in category_data[category]:
-                                category_data[category][sequence] = []
-                            category_data[category][sequence].append((frame_idx, img_path))
-    
-    # Sort frames within each sequence by frame index to ensure temporal order
-    for category, sequences in category_data.items():
-        for sequence in sequences:
+    category_data = defaultdict(dict)
+
+    for category, zip_files in zip_mapping.items():
+        print(f"Processing category '{category}' with {len(zip_files)} zip files")
+        
+        # Search for 'set_lists' files within each zip for the category
+        for zip_file in zip_files:
+            with ZipFile(zip_file, 'r') as z:
+                # Check for the presence of "set_lists/set_lists_manyview_train.json"
+                set_list_files = [f for f in z.namelist() if "set_lists/set_lists_manyview_train.json" in f]
+                
+                if set_list_files:
+                    # Load the first match (assuming only one relevant file per zip)
+                    with z.open(set_list_files[0]) as f:
+                        data = json.load(f)
+
+                        if "train_known" in data:
+                            print(f"Found 'train_known' entries in {set_list_files[0]} for category '{category}'")
+                            
+                            # Store each entry in category_data for easier access
+                            for entry in data["train_known"]:
+                                sequence, frame_idx, img_path = entry
+                                
+                                # Initialize sequence if it doesn't exist
+                                if sequence not in category_data[category]:
+                                    category_data[category][sequence] = []
+                                    
+                                # Append frame information (index and path)
+                                category_data[category][sequence].append((frame_idx, img_path))
+        
+        # Ensure frames in each sequence are sorted by frame index
+        for sequence in category_data[category]:
             category_data[category][sequence].sort()  # Sort by frame_idx
+            print(f"Sorted frames for category '{category}', sequence '{sequence}': {category_data[category][sequence]}")
     
+    # Save the structured mapping to avoid recomputation
+    detailed_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+    #detailed_mapping_path = os.path.join(root_directory, "detailed_mapping.json")
+    with open(detailed_mapping_path, 'w') as f:
+        json.dump(category_data, f)
+
+    print("Finished creating detailed mapping.")
     return category_data
     
 
@@ -528,7 +549,8 @@ class CO3DDataset(Dataset):
         self.regular_step = regular_step
 
         # Load existing mapping or create a new one
-        mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+        #mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+        mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
         self.data = load_mapping(mapping_path)
         if self.data is None:
             print("Creating detailed mapping for the first time...")
