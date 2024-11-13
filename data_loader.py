@@ -498,7 +498,7 @@ def locate_and_load_set_lists(root_directory, zip_mapping_path):
         for zip_file in zip_files:
             with ZipFile(zip_file, 'r') as z:
                 # Check for the presence of "set_lists/set_lists_manyview_train.json"
-                set_list_files = [f for f in z.namelist() if "set_lists/set_lists_manyview_train.json" in f]
+                set_list_files = [f for f in z.namelist() if "set_lists/set_lists_manyview_dev_0.json" in f]
                 
                 if set_list_files:
                     # Load the first match (assuming only one relevant file per zip)
