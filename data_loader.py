@@ -505,7 +505,7 @@ class CO3DDataset(Dataset):
             save_mapping(self.category_zip_map, mapping_path)
         
         #print("Keys initialized:", self.keys)
-        print("Length of dataset:", len(self.keys))
+        #print("Length of dataset:", len(self.keys))
     
     def organize_zips_by_category(self):
         category_zip_map = {}
