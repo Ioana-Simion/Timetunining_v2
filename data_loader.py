@@ -472,11 +472,21 @@ class VideoDataset(torch.utils.data.Dataset):
         return data, annotations
 
 
+def save_mapping(mapping, filepath="zip_mapping.json"):
+    with open(filepath, "w") as f:
+        json.dump(mapping, f)
+
+def load_mapping(filepath="zip_mapping.json"):
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            return json.load(f)
+    return None
+    
+
 class CO3DDataset(Dataset):
     def __init__(self, root_directory, subset_name, sampling_mode, num_clips, num_frames,
                  frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
         super().__init__()
-        
         self.root_directory = root_directory
         self.subset_name = subset_name
         self.sampling_mode = sampling_mode
@@ -486,14 +496,13 @@ class CO3DDataset(Dataset):
         self.target_transform = target_transform
         self.video_transform = video_transform
         self.regular_step = regular_step
-        
-        # Organize zip files by category
-        self.category_zip_map = self.organize_zips_by_category()
-        
-        # Load file paths for images and masks from zip files
-        self.train_dict = self.get_file_paths_from_zips()
-        self.train_dict_lengths = {key: len(files['images']) for key, files in self.train_dict.items()}
-        self.keys = list(self.train_dict.keys())
+
+        # Load existing mapping or create a new one
+        mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
+        self.category_zip_map = load_mapping(mapping_path)
+        if self.category_zip_map is None:
+            self.category_zip_map = self.organize_zips_by_category()
+            save_mapping(self.category_zip_map, mapping_path)
         
         #print("Keys initialized:", self.keys)
         print("Length of dataset:", len(self.keys))
@@ -513,12 +522,13 @@ class CO3DDataset(Dataset):
             if metadata_filename in z.namelist():
                 with z.open(metadata_filename) as f:
                     with gzip.open(f, 'rt', encoding='utf-8') as gf:
+                        print(f'Metadata file {metadata_filename} found in {zip_file}.')
                         return json.load(gf)
         return None
 
     def get_file_paths_from_zips(self):
         folder_file_path = {}
-
+        
         for category, zip_files in self.category_zip_map.items():
             images = []
             frame_annotations = None
@@ -526,10 +536,12 @@ class CO3DDataset(Dataset):
 
             for zip_file in zip_files:
                 with ZipFile(zip_file, 'r') as z:
+                    # Collect images with their zip file location
                     all_files = z.namelist()
                     img_files = [f for f in all_files if f.startswith(f"{category}/") and "images/" in f and f.endswith((".jpg", ".png"))]
+
                     if img_files:
-                        images.extend(img_files)
+                        images.extend((img, zip_file) for img in img_files)  # Store tuple of image path and zip file path
 
                     # Load annotations if not already loaded
                     if frame_annotations is None:
@@ -537,18 +549,16 @@ class CO3DDataset(Dataset):
                     if sequence_annotations is None:
                         sequence_annotations = self.load_metadata_from_zip(zip_file, "sequence_annotations.jgz")
 
-            images.sort()
+            images.sort(key=lambda x: x[0])  # Sort by image path
             if images:
                 folder_file_path[category] = {
-                    'images': images,
+                    'images': images,  # List of (image_path, zip_file_path) tuples
                     'frame_annotations': frame_annotations,
                     'sequence_annotations': sequence_annotations,
-                    'zip_files': zip_files
                 }
-            else:
-                print(f"Warning: No images found for category {category}, skipping this category.")
-
+        
         return folder_file_path
+
 
 
     def __len__(self):
@@ -568,32 +578,27 @@ class CO3DDataset(Dataset):
             indices.append(idx)
         return indices
 
-    def read_clips(self, zip_files, clip_indices, image_paths):
+    def read_clips(self, clip_indices, image_paths):
         clips = []
-        zip_file_iters = iter(zip_files)
-        current_zip = ZipFile(next(zip_file_iters), 'r')
 
         for indices in clip_indices:
             images = []
             for idx in indices:
-                img_path = image_paths[idx]
+                img_path, zip_file = image_paths[idx]  # Retrieve image path and corresponding zip file
                 try:
-                    # Switch zip file if needed & not found in current zip
-                    while img_path not in current_zip.namelist():
-                        current_zip = ZipFile(next(zip_file_iters), 'r')
-                    
-                    # Attempt to load image
-                    images.append(Image.open(current_zip.open(img_path)).convert("RGB"))
-                except (KeyError, StopIteration):
-                    print(f"Warning: File {img_path} not found in any zip file. Skipping.")
-                    continue  # Silently skip for now
+                    with ZipFile(zip_file, 'r') as z:
+                        images.append(Image.open(z.open(img_path)).convert("RGB"))
+                except KeyError:
+                    print(f"Warning: File {img_path} not found in {zip_file}. Skipping.")
+                    continue  # Skip if the image isn't found in the expected zip
 
             if images:
                 clips.append(images)
             else:
-                print(f"Warning: No images found for the clip at index {indices}. Skipping this clip.")
+                print(f"Warning: No images found for the clip at indices {indices}. Skipping this clip.")
 
         return clips
+
 
     def get_annotations_for_frame(self, category, frame_number):
         # Fetch metadata for a specific frame within a category if available
@@ -605,22 +610,15 @@ class CO3DDataset(Dataset):
         return None
 
     def read_batch(self, category):
+        # Reads a batch of frames and corresponding annotations from multiple zip files in a category
         zip_files = self.train_dict[category]['zip_files']
         image_paths = self.train_dict[category]['images']
         size = len(image_paths)
-
+        
         clip_indices = self.generate_indices(size)
         clips = self.read_clips(zip_files, clip_indices, image_paths)
-
-        # Filter out any clips with None or empty lists
-        clips = [clip for clip in clips if clip]
-
-        # Skip batch if no valid clips were loaded
-        if not clips:
-            print(f"Warning: No valid clips found for category {category}.")
-            return None, None
-
-        # Apply transformations and stack the data
+        
+        # Apply transformations
         if self.frame_transform:
             clips = [self.frame_transform(clip) for clip in clips]
         
@@ -629,28 +627,12 @@ class CO3DDataset(Dataset):
         
         data = torch.stack([torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in clip]) for clip in clips])
 
-        return data, None 
+        return data, None  
 
    
     def __getitem__(self, idx):
         category = self.keys[idx]
-        try:
-            data, annotations = self.read_batch(category)
-            
-            if data is None:
-                raise ValueError(f"No valid data for category {category} at index {idx}.")
-            
-            return data, annotations
-
-        except Exception as e:
-            print(f"Skipping invalid sample for category {category} at index {idx} due to: {e}")
-            
-            # Return a dummy tensor of the correct shape or any valid sample in place of invalid ones
-            dummy_shape = (self.num_frames, 3, 224, 224)  
-            dummy_data = torch.zeros(dummy_shape)  
-            dummy_annotations = {}  
-            return dummy_data, dummy_annotations
-
+        return self.read_batch(category)
 
 
 CLASS_IDS = {
