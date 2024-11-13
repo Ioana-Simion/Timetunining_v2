@@ -503,9 +503,12 @@ class CO3DDataset(Dataset):
         if self.category_zip_map is None:
             self.category_zip_map = self.organize_zips_by_category()
             save_mapping(self.category_zip_map, mapping_path)
+
+        self.train_dict = self.get_file_paths_from_zips()
+        self.keys = list(self.train_dict.keys())
         
         #print("Keys initialized:", self.keys)
-        #print("Length of dataset:", len(self.keys))
+        print("Length of dataset:", len(self.keys))
     
     def organize_zips_by_category(self):
         category_zip_map = {}
