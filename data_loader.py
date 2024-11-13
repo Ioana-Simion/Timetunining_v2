@@ -612,15 +612,22 @@ class CO3DDataset(Dataset):
         return None
 
     def read_batch(self, category):
-        # Reads a batch of frames and corresponding annotations from multiple zip files in a category
         zip_files = self.train_dict[category]['zip_files']
         image_paths = self.train_dict[category]['images']
         size = len(image_paths)
-        
+
         clip_indices = self.generate_indices(size)
         clips = self.read_clips(zip_files, clip_indices, image_paths)
-        
-        # Apply transformations
+
+        # Filter out any clips with None or empty lists
+        clips = [clip for clip in clips if clip]
+
+        # Skip batch if no valid clips were loaded
+        if not clips:
+            print(f"Warning: No valid clips found for category {category}.")
+            return None, None
+
+        # Apply transformations and stack the data
         if self.frame_transform:
             clips = [self.frame_transform(clip) for clip in clips]
         
@@ -633,7 +640,14 @@ class CO3DDataset(Dataset):
 
     def __getitem__(self, idx):
         category = self.keys[idx]
-        return self.read_batch(category)
+        data, annotations = self.read_batch(category)
+
+        # Skip if no valid data is returned
+        if data is None:
+            raise ValueError(f"No valid data found for category {category} at index {idx}. Skipping.")
+
+        return data, annotations
+
 
 CLASS_IDS = {
     "aeroplane": 1,
