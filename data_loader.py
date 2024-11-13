@@ -558,9 +558,8 @@ def locate_and_load_set_lists(root_directory, zip_mapping_path):
     
 
 class CO3DDataset(Dataset):
-
     def __init__(self, root_directory, subset_name, sampling_mode, num_clips, num_frames,
-             frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
+                 frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
         super().__init__()
         self.root_directory = root_directory
         self.subset_name = subset_name
@@ -572,80 +571,30 @@ class CO3DDataset(Dataset):
         self.video_transform = video_transform
         self.regular_step = regular_step
 
-        # Load the precomputed detailed mapping
-        mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
-        detailed_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
-        self.category_data = load_mapping(detailed_mapping_path)
+        # Load or create detailed mapping
+        zip_mapping_path = os.path.join(root_directory, "zip_mapping.json")
+        detailed_mapping_path = os.path.join(root_directory, "detailed_mapping.json")
+        self.category_data = self.load_mapping(detailed_mapping_path)
         if self.category_data is None:
-            print("Creating detailed mapping for the first time...")
-            self.category_data = locate_and_load_set_lists(self.root_directory, mapping_path)
-            save_mapping(self.category_data, detailed_mapping_path)
-        else:
-            print("Loaded existing detailed mapping.")
+            self.category_data = locate_and_load_set_lists(root_directory, zip_mapping_path)
+            with open(detailed_mapping_path, 'w') as f:
+                json.dump(self.category_data, f)
 
-        # Flatten the mapping to create sequences and frames lists
+        # Flatten the mapping to create sequences list
         self.sequences = [
             {"category": category, "sequence": sequence, "frames": frames}
             for category, seq_data in self.category_data.items()
             for sequence, frames in seq_data.items()
         ]
-
         print("Number of sequences:", len(self.sequences))
 
-    
-    def organize_zips_by_category(self):
-        category_zip_map = {}
-        for zip_path in glob.glob(os.path.join(self.root_directory, "*.zip")):
-            category = os.path.basename(zip_path).split("_")[0]
-            if category not in category_zip_map:
-                category_zip_map[category] = []
-            category_zip_map[category].append(zip_path)
-        #print("Category zip map:", category_zip_map)  
-        return category_zip_map
-
-    def load_metadata_from_zip(self, zip_file, metadata_filename):
-        with ZipFile(zip_file, 'r') as z:
-            if metadata_filename in z.namelist():
-                with z.open(metadata_filename) as f:
-                    with gzip.open(f, 'rt', encoding='utf-8') as gf:
-                        print(f'Metadata file {metadata_filename} found in {zip_file}.')
-                        return json.load(gf)
+    @staticmethod
+    def load_mapping(mapping_path):
+        """Load the mapping if it exists."""
+        if os.path.isfile(mapping_path):
+            with open(mapping_path, 'r') as f:
+                return json.load(f)
         return None
-
-    def get_file_paths_from_zips(self):
-        folder_file_path = {}
-        
-        for category, zip_files in self.category_zip_map.items():
-            images = []
-            frame_annotations = None
-            sequence_annotations = None
-
-            for zip_file in zip_files:
-                with ZipFile(zip_file, 'r') as z:
-                    # Collect images with their zip file location
-                    all_files = z.namelist()
-                    img_files = [f for f in all_files if f.startswith(f"{category}/") and "images/" in f and f.endswith((".jpg", ".png"))]
-
-                    if img_files:
-                        images.extend((img, zip_file) for img in img_files)  # Store tuple of image path and zip file path
-
-                    # Load annotations if not already loaded
-                    if frame_annotations is None:
-                        frame_annotations = self.load_metadata_from_zip(zip_file, "frame_annotations.jgz")
-                    if sequence_annotations is None:
-                        sequence_annotations = self.load_metadata_from_zip(zip_file, "sequence_annotations.jgz")
-
-            images.sort(key=lambda x: x[0])  # Sort by image path
-            if images:
-                folder_file_path[category] = {
-                    'images': images,  # List of (image_path, zip_file_path) tuples
-                    'frame_annotations': frame_annotations,
-                    'sequence_annotations': sequence_annotations,
-                }
-        
-        return folder_file_path
-
-
 
     def __len__(self):
         return len(self.sequences)
@@ -666,58 +615,21 @@ class CO3DDataset(Dataset):
 
     def read_clips(self, clip_indices, image_paths):
         clips = []
-
         for indices in clip_indices:
             images = []
             for idx in indices:
-                img_path, zip_file = image_paths[idx]  # Retrieve image path and corresponding zip file
-                try:
-                    with ZipFile(zip_file, 'r') as z:
-                        images.append(Image.open(z.open(img_path)).convert("RGB"))
-                except KeyError:
-                    print(f"Warning: File {img_path} not found in {zip_file}. Skipping.")
-                    continue  # Skip if the image isn't found in the expected zip
-
-            if images:
-                clips.append(images)
-            else:
-                print(f"Warning: No images found for the clip at indices {indices}. Skipping this clip.")
-
+                img_path, zip_file = image_paths[idx]
+                with ZipFile(zip_file, 'r') as z:
+                    images.append(Image.open(z.open(img_path)).convert("RGB"))
+            clips.append(images)
         return clips
 
-
-    def get_annotations_for_frame(self, category, frame_number):
-        # Fetch metadata for a specific frame within a category if available
-        frame_annotations = self.train_dict[category].get('frame_annotations')
-        if frame_annotations:
-            for frame in frame_annotations:
-                if frame['frame_number'] == frame_number:
-                    return frame
-        return None
-
-    def read_batch(self, category):
-        # Reads a batch of frames and corresponding annotations from multiple zip files in a category
-        zip_files = self.train_dict[category]['zip_files']
-        image_paths = self.train_dict[category]['images']
-        size = len(image_paths)
-        
-        clip_indices = self.generate_indices(size)
-        clips = self.read_clips(zip_files, clip_indices, image_paths)
-        
-        # Apply transformations
-        if self.frame_transform:
-            clips = [self.frame_transform(clip) for clip in clips]
-        
-        if self.video_transform:
-            clips = [self.video_transform(clip) for clip in clips]
-        
-        data = torch.stack([torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in clip]) for clip in clips])
-
-        return data, None  
-
-   
     def __getitem__(self, idx):
-        category, sequence, frames = self.sequences[idx]
+        sequence_data = self.sequences[idx]
+        category = sequence_data["category"]
+        sequence = sequence_data["sequence"]
+        frames = sequence_data["frames"]
+
         if len(frames) >= self.num_frames:
             start = random.randint(0, len(frames) - self.num_frames)
             selected_frames = frames[start:start + self.num_frames]
@@ -726,16 +638,15 @@ class CO3DDataset(Dataset):
 
         images = []
         for frame_idx, img_path in selected_frames:
-            zip_file_path = os.path.join(self.root_directory, f"{category}.zip")
+            zip_file_path = [zip_file for zip_file in self.category_data[category][sequence] if img_path in zip_file][0]
             with ZipFile(zip_file_path, 'r') as z:
                 img = Image.open(z.open(img_path)).convert("RGB")
-                if self.transform:
-                    img = self.transform(img)
+                if self.frame_transform:
+                    img = self.frame_transform(img)
                 images.append(img)
 
         images_tensor = torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in images])
         return images_tensor
-
 
 CLASS_IDS = {
     "aeroplane": 1,
@@ -1201,7 +1112,7 @@ class VideoDataModule():
         print("Meta File Path:", self.meta_file_path)
 
 
-    
+
     def setup(self, transforms_dict):
         data_transforms = transforms_dict["data_transforms"]
         target_transforms = transforms_dict["target_transforms"]
