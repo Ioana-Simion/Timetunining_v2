@@ -572,8 +572,8 @@ class CO3DDataset(Dataset):
         self.regular_step = regular_step
 
         # Load or create detailed mapping
-        zip_mapping_path = os.path.join(root_directory, "zip_mapping.json")
-        detailed_mapping_path = os.path.join(root_directory, "detailed_mapping.json")
+        zip_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
+        detailed_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
         self.category_data = self.load_mapping(detailed_mapping_path)
         if self.category_data is None:
             self.category_data = locate_and_load_set_lists(root_directory, zip_mapping_path)
