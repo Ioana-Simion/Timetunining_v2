@@ -176,6 +176,7 @@ class TimeTuningV2Trainer():
         self.best_recall = 0
         self.spair_val = spair_val
         if self.spair_val:
+            print(f'spair_data_path: {spair_data_path}')
             spair_dataset = SPairDataset(
                     root=spair_data_path,
                     split="test",
