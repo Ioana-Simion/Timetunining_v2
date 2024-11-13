@@ -489,12 +489,14 @@ def locate_and_load_set_lists(root_directory):
     
     for zip_path in glob.glob(os.path.join(root_directory, "*.zip")):
         category = os.path.basename(zip_path).split("_")[0]
+        print(f"Processing zip file for category '{category}': {zip_path}")
 
         with ZipFile(zip_path, 'r') as z:
             # Try to locate the set_lists.json
             set_list_files = [f for f in z.namelist() if "set_lists.json" in f]
             if set_list_files:
                 with z.open(set_list_files[0]) as f:
+                    print(f"Found set_lists.json in {zip_path}")
                     data = json.load(f)
                     if "train_known" in data:
                         for entry in data["train_known"]:
