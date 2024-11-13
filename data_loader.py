@@ -517,7 +517,6 @@ class CO3DDataset(Dataset):
         return None
 
     def get_file_paths_from_zips(self):
-        # Get images and annotations across multiple zip files per category
         folder_file_path = {}
 
         for category, zip_files in self.category_zip_map.items():
@@ -527,13 +526,8 @@ class CO3DDataset(Dataset):
 
             for zip_file in zip_files:
                 with ZipFile(zip_file, 'r') as z:
-                    # Collect images - specifically from the "images/" directory
                     all_files = z.namelist()
                     img_files = [f for f in all_files if f.startswith(f"{category}/") and "images/" in f and f.endswith((".jpg", ".png"))]
-
-                    # Debug print to ensure we are capturing the intended paths
-                    #print(f"Images found in {zip_file}: {img_files}")
-
                     if img_files:
                         images.extend(img_files)
 
@@ -543,20 +537,19 @@ class CO3DDataset(Dataset):
                     if sequence_annotations is None:
                         sequence_annotations = self.load_metadata_from_zip(zip_file, "sequence_annotations.jgz")
 
-            # Sort images and store in dict
             images.sort()
             if images:
                 folder_file_path[category] = {
                     'images': images,
                     'frame_annotations': frame_annotations,
                     'sequence_annotations': sequence_annotations,
-                    'zip_files': zip_files  # Keep track of zip files to load data from
+                    'zip_files': zip_files
                 }
             else:
-                print(f"Warning: No images found for category {category}")
+                print(f"Warning: No images found for category {category}, skipping this category.")
 
-        #print("Train dictionary contents:", folder_file_path) 
         return folder_file_path
+
 
     def __len__(self):
         return len(self.keys)
