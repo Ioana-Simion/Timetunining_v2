@@ -481,6 +481,34 @@ def load_mapping(filepath="zip_mapping.json"):
         with open(filepath, "r") as f:
             return json.load(f)
     return None
+
+from collections import defaultdict
+
+def locate_and_load_set_lists(root_directory):
+    category_data = defaultdict(dict)
+    
+    for zip_path in glob.glob(os.path.join(root_directory, "*.zip")):
+        category = os.path.basename(zip_path).split("_")[0]
+
+        with ZipFile(zip_path, 'r') as z:
+            # Try to locate the set_lists.json
+            set_list_files = [f for f in z.namelist() if "set_lists.json" in f]
+            if set_list_files:
+                with z.open(set_list_files[0]) as f:
+                    data = json.load(f)
+                    if "train_known" in data:
+                        for entry in data["train_known"]:
+                            sequence, frame_idx, img_path = entry
+                            if sequence not in category_data[category]:
+                                category_data[category][sequence] = []
+                            category_data[category][sequence].append((frame_idx, img_path))
+    
+    # Sort frames within each sequence by frame index to ensure temporal order
+    for category, sequences in category_data.items():
+        for sequence in sequences:
+            category_data[category][sequence].sort()  # Sort by frame_idx
+    
+    return category_data
     
 
 class CO3DDataset(Dataset):
@@ -498,17 +526,25 @@ class CO3DDataset(Dataset):
         self.regular_step = regular_step
 
         # Load existing mapping or create a new one
-        mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
-        self.category_zip_map = load_mapping(mapping_path)
-        if self.category_zip_map is None:
-            self.category_zip_map = self.organize_zips_by_category()
-            save_mapping(self.category_zip_map, mapping_path)
+        mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+        self.data = load_mapping(mapping_path)
+        if self.data is None:
+            print("Creating detailed mapping for the first time...")
+            self.data = locate_and_load_set_lists(root_directory)
+            save_mapping(self.data, mapping_path)
+        else:
+            print("Loaded existing detailed mapping.")
 
-        self.train_dict = self.get_file_paths_from_zips()
-        self.keys = list(self.train_dict.keys())
+        self.sequences = [
+            (category, sequence, frames)
+            for category, seq_data in self.data.items()
+            for sequence, frames in seq_data.items()
+        ]
+        # self.train_dict = self.get_file_paths_from_zips()
+        # self.keys = list(self.train_dict.keys())
         
-        #print("Keys initialized:", self.keys)
-        print("Length of dataset:", len(self.keys))
+        # #print("Keys initialized:", self.keys)
+        # print("Length of dataset:", len(self.keys))
     
     def organize_zips_by_category(self):
         category_zip_map = {}
@@ -565,7 +601,7 @@ class CO3DDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.keys)
+        return len(self.sequences)
 
     def generate_indices(self, size):
         indices = []
@@ -634,8 +670,24 @@ class CO3DDataset(Dataset):
 
    
     def __getitem__(self, idx):
-        category = self.keys[idx]
-        return self.read_batch(category)
+        category, sequence, frames = self.sequences[idx]
+        if len(frames) >= self.num_frames:
+            start = random.randint(0, len(frames) - self.num_frames)
+            selected_frames = frames[start:start + self.num_frames]
+        else:
+            selected_frames = random.choices(frames, k=self.num_frames)
+
+        images = []
+        for frame_idx, img_path in selected_frames:
+            zip_file_path = os.path.join(self.root_directory, f"{category}.zip")
+            with ZipFile(zip_file_path, 'r') as z:
+                img = Image.open(z.open(img_path)).convert("RGB")
+                if self.transform:
+                    img = self.transform(img)
+                images.append(img)
+
+        images_tensor = torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in images])
+        return images_tensor
 
 
 CLASS_IDS = {
