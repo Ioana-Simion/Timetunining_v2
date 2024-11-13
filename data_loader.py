@@ -505,11 +505,11 @@ def locate_and_load_set_lists(zip_mapping_path):
                     with z.open(set_list_files[0]) as f:
                         data = json.load(f)
 
-                        if "train_known" in data:
+                        if "train" in data:
                             print(f"Found 'train_known' entries in {set_list_files[0]} for category '{category}'")
                             
                             # Store each entry in category_data for easier access
-                            for entry in data["train_known"]:
+                            for entry in data["train"]:
                                 sequence, frame_idx, img_path = entry
                                 
                                 # Initialize sequence if it doesn't exist
