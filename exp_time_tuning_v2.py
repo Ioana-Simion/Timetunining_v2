@@ -186,6 +186,7 @@ class TimeTuningV2Trainer():
                     num_instances=100,
                     vp_diff=None,
             )
+            print(f'Length of SPair Dataset: {len(spair_dataset)}')
             self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
 
     
