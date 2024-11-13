@@ -498,9 +498,6 @@ def generate_zip_mapping(root_directory, zip_mapping_path):
     print(f"Zip mapping saved at {zip_mapping_path}")
 
 def locate_and_load_set_lists(root_directory, zip_mapping_path):
-    # Load existing zip mapping
-    with open(zip_mapping_path, 'r') as f:
-        zip_mapping = json.load(f)
 
     if os.path.isfile(zip_mapping_path):
         with open(zip_mapping_path, 'r') as f:
