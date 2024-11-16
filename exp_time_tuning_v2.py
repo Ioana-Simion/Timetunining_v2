@@ -271,9 +271,7 @@ class TimeTuningV2Trainer():
         self.time_tuning_model.eval()
         with torch.no_grad():
             metric = PredsmIoU(21, 21)
-            # spatial_feature_dim = self.model.get_dino_feature_spatial_dim()
-            spatial_feature_dim = 50
-            clustering_method = PerDatasetClustering(spatial_feature_dim, 21)
+            clustering_method = PerDatasetClustering(50, 21)  # spatial_feature_dim and num_classes
             feature_spatial_resolution = self.time_tuning_model.feature_extractor.eval_spatial_resolution
             feature_group = []
             targets = []
@@ -318,14 +316,10 @@ class TimeTuningV2Trainer():
             eval_features = torch.cat(feature_group, dim=0)  # (B, num_patches, dim)
             eval_targets = torch.cat(targets, dim=0)  # (B, H, W)
 
-            # Reshape eval_features to expected dimensions for clustering
             B, num_patches, dim = eval_features.shape
-            eval_features = eval_features.reshape(B, 1, num_patches, dim)  # (B, 1, num_patches, dim)
-            cluster_maps = clustering_method.cluster(eval_features)  # (B, H, W)
-
-            print(f"Patch Features Shape: {patch_features.shape}")
-            print(f"Eval Features Shape: {eval_features.shape}")
-            print(f"Cluster Maps Reshaped Shape: {cluster_maps.shape}")
+            eval_features_flat = eval_features.reshape(-1, dim)  # Flatten for clustering
+            cluster_maps_flat = clustering_method.cluster(eval_features_flat)  # (B * num_patches,)
+            cluster_maps = cluster_maps_flat.reshape(B, val_spatial_resolution, val_spatial_resolution).unsqueeze(1)
 
             valid_idx = eval_targets != 255
             valid_target = eval_targets[valid_idx]
