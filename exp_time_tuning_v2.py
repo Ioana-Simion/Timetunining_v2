@@ -47,7 +47,7 @@ class TimeTuningV2(torch.nn.Module):
         self.input_size = input_size
         if model_type == 'dino':
             self.eval_spatial_resolution = input_size // 16
-        elif model_type == 'dinov2':
+        elif model_type == 'dinov2' or model_type == 'registers':
             self.eval_spatial_resolution = input_size // 14
         self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution, d_model=384, model_type=model_type)
         self.FF = FeatureForwarder(self.eval_spatial_resolution, context_frames, context_window, topk=topk, feature_head=None)
@@ -405,7 +405,7 @@ def run(args):
 
     if args.model_type == 'dino':
         vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
-    elif args.model_type == 'dinov2':
+    elif args.model_type == 'dinov2' or args.model_type == 'registers':
         vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
     patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type)
     optimization_config = {
@@ -453,7 +453,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)
     parser.add_argument('--crop_scale_tupple', type=tuple, default=(0.3, 1))
-    parser.add_argument('--model_type', type=str, choices=['dino', 'dinov2'], default='dinov2', help='Select model type: dino or dinov2')
+    parser.add_argument('--model_type', type=str, choices=['dino', 'dinov2', 'registers'], default='dinov2', help='Select model type: dino or dinov2')
     parser.add_argument('--masking_ratio', type=float, default=1)
     parser.add_argument('--same_frame_query_ref', type=bool, default=False)
     parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
