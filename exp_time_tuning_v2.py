@@ -301,7 +301,9 @@ class TimeTuningV2Trainer():
                 patch_features = F.interpolate(
                     patch_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear"
                 )
-                patch_features = patch_features.reshape(patch_features.shape[0], -1, patch_features.shape[1]).permute(0, 2, 1)
+                patch_features = patch_features.reshape(
+                    patch_features.shape[0], -1, patch_features.shape[1]
+                ).permute(0, 2, 1)  # Reshape to (B, num_patches, dim)
 
                 # Append resized targets and patch features
                 resized_target = F.interpolate(
@@ -311,12 +313,20 @@ class TimeTuningV2Trainer():
                 ).long()
                 targets.append(resized_target)
                 feature_group.append(patch_features)
-            eval_features = torch.cat(feature_group, dim=0)
-            eval_targets = torch.cat(targets, dim=0)
-            eval_features_flat = eval_features.reshape(-1, eval_features.shape[-1])  # Flatten for clustering
-            cluster_maps_flat = clustering_method.cluster(eval_features_flat)  # (N, )
-            B = eval_features.shape[0]
-            cluster_maps = cluster_maps_flat.reshape(B, val_spatial_resolution, val_spatial_resolution)  # Reshape into grid
+
+            # Concatenate all patch features and targets
+            eval_features = torch.cat(feature_group, dim=0)  # (B, num_patches, dim)
+            eval_targets = torch.cat(targets, dim=0)  # (B, H, W)
+
+            # Reshape eval_features to expected dimensions for clustering
+            B, num_patches, dim = eval_features.shape
+            eval_features = eval_features.reshape(B, 1, num_patches, dim)  # (B, 1, num_patches, dim)
+            cluster_maps = clustering_method.cluster(eval_features)  # (B, H, W)
+
+            print(f"Patch Features Shape: {patch_features.shape}")
+            print(f"Eval Features Shape: {eval_features.shape}")
+            print(f"Cluster Maps Reshaped Shape: {cluster_maps.shape}")
+
             valid_idx = eval_targets != 255
             valid_target = eval_targets[valid_idx]
             valid_cluster_maps = cluster_maps[valid_idx]
@@ -324,12 +334,6 @@ class TimeTuningV2Trainer():
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
 
-            print(f"Patch Features Shape: {patch_features.shape}")
-            print(f"Eval Features Shape: {eval_features.shape}")
-            print(f"Cluster Maps Flat Shape: {cluster_maps_flat.shape}")
-            print(f"Cluster Maps Reshaped Shape: {cluster_maps.shape}")
-
-            #threshold = 0.143
             if jac > self.best_miou:
                 self.best_miou = jac
                 checkpoint_dir = "checkpoints"
