@@ -638,15 +638,32 @@ class CO3DDataset(Dataset):
 
         images = []
         for frame_idx, img_path in selected_frames:
-            zip_file_path = [zip_file for zip_file in self.category_data[category][sequence] if img_path in zip_file][0]
-            with ZipFile(zip_file_path, 'r') as z:
-                img = Image.open(z.open(img_path)).convert("RGB")
-                if self.frame_transform:
-                    img = self.frame_transform(img)
-                images.append(img)
+            # Retrieve the correct zip file path associated with this img_path
+            zip_file_path = None
+            for zip_file in self.category_data[category]:
+                if img_path in self.category_data[category][zip_file]:  # Adjust lookup if necessary
+                    zip_file_path = zip_file
+                    break
+
+            if zip_file_path is None:
+                print(f"Warning: No zip file found for {img_path}")
+                continue
+
+            try:
+                with ZipFile(zip_file_path, 'r') as z:
+                    img = Image.open(z.open(img_path)).convert("RGB")
+                    if self.frame_transform:
+                        img = self.frame_transform(img)
+                    images.append(img)
+            except KeyError:
+                print(f"Warning: {img_path} not found in {zip_file_path}")
+
+        if not images:
+            raise ValueError(f"No images found for sequence {sequence} at index {idx}")
 
         images_tensor = torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in images])
         return images_tensor
+
 
 CLASS_IDS = {
     "aeroplane": 1,
