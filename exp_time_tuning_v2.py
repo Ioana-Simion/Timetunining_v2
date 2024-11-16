@@ -88,33 +88,47 @@ class TimeTuningV2(torch.nn.Module):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
         denormalized_video = denormalize_video(datum)
-        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))
+
+        # Extract features and registers
+        dataset_features, register_tokens = self.feature_extractor.forward_features(datum.flatten(0, 1))
+        if self.model_type == "registers":
+            dataset_features = torch.cat((register_tokens, dataset_features), dim=1)
+
         _, np, dim = dataset_features.shape
         target_scores_group = []
         q_group = []
 
         projected_dataset_features = self.mlp_head(dataset_features)
         projected_dim = projected_dataset_features.shape[-1]
-        projected_dataset_features = projected_dataset_features.reshape(-1, projected_dim)
-        normalized_projected_features = F.normalize(projected_dataset_features, dim=-1, p=2)
+        normalized_projected_features = F.normalize(
+            projected_dataset_features.reshape(-1, projected_dim), dim=-1, p=2
+        )
 
-        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features , self.prototypes)
+        dataset_scores = torch.einsum("bd,nd->bn", normalized_projected_features, self.prototypes)
         dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
         dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
         dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
+
         dataset_first_frame_q = dataset_q[:, 0, :, :]
-        dataset_first_frame_scores = dataset_scores[:, 0, :, :]
         dataset_target_frame_scores = dataset_scores[:, -1, :, :]
-        dataset_first_frame_q = dataset_first_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2).float()
+
+        dataset_first_frame_q = dataset_first_frame_q.reshape(
+            bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+        ).permute(0, 3, 1, 2).float()
+
         dataset_features = dataset_features.reshape(bs, nf, np, dim)
         loss = 0
+
         for i, clip_features in enumerate(dataset_features):
             q = dataset_first_frame_q[i]
             target_frame_scores = dataset_target_frame_scores[i]
             prediction = self.FF.forward(clip_features, q)
-            prediction = torch.stack(prediction, dim=0)
-            propagated_q = prediction[-1]
-            target_frame_scores = target_frame_scores.reshape(self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(2, 0, 1).float()
+            propagated_q = torch.stack(prediction, dim=0)[-1]
+
+            target_frame_scores = target_frame_scores.reshape(
+                self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+            ).permute(2, 0, 1).float()
+
             target_scores_group.append(target_frame_scores)
             q_group.append(propagated_q)
             ## visualize the clustering
@@ -124,13 +138,13 @@ class TimeTuningV2(torch.nn.Module):
             # _, overlayed_images = overlay_video_cmap(resized_cluster_map, denormalized_video[i])
             # convert_list_to_video(overlayed_images.detach().cpu().permute(0, 2, 3, 1).numpy(), f"Temp/overlayed_{i}.mp4", speed=1000/ nf)
         
+
         target_scores = torch.stack(target_scores_group, dim=0)
-        propagated_q_group = torch.stack(q_group, dim=0)
-        propagated_q_group = propagated_q_group.argmax(dim=1)
-        clustering_loss = self.criterion(target_scores  / 0.1, propagated_q_group.long())
-        
+        propagated_q_group = torch.stack(q_group, dim=0).argmax(dim=1)
+        clustering_loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
+
         return clustering_loss
-    
+
 
     def get_params_dict(self, model, exclude_decay=True, lr=1e-4):
         params = []
@@ -271,60 +285,45 @@ class TimeTuningV2Trainer():
         self.time_tuning_model.eval()
         with torch.no_grad():
             metric = PredsmIoU(21, 21)
-            clustering_method = PerDatasetClustering(50, 21)  # spatial_feature_dim and num_classes
-            feature_spatial_resolution = self.time_tuning_model.feature_extractor.eval_spatial_resolution
+            clustering_method = PerDatasetClustering(50, 21)
             feature_group = []
             targets = []
+
             for i, (x, y) in enumerate(self.test_dataloader):
                 target = (y * 255).long()
                 img = x.to(self.device)
 
-                # Extract spatial features
-                spatial_features, _ = self.time_tuning_model.validate_step(img)
-                patch_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
-                
-                # Calculate dynamic spatial resolution
-                num_patches = patch_features.shape[1]
-                dynamic_spatial_resolution = int(num_patches**0.5)
+                # Extract features and registers
+                spatial_features, register_tokens = self.time_tuning_model.validate_step(img)
+                if self.time_tuning_model.model_type == "registers":
+                    spatial_features = torch.cat((register_tokens, spatial_features), dim=1)
 
-                # Ensure reshaping is valid
+                # Reshape features for clustering
+                num_patches = spatial_features.shape[1]
+                dynamic_spatial_resolution = int(num_patches**0.5)
                 assert dynamic_spatial_resolution**2 == num_patches, (
                     f"Cannot reshape features of length {num_patches} into a grid."
                 )
 
-                # Reshape patch features for clustering
-                patch_features = patch_features.reshape(
-                    patch_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1
+                spatial_features = spatial_features.reshape(
+                    spatial_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1
                 ).permute(0, 3, 1, 2).contiguous()
-                patch_features = F.interpolate(
-                    patch_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear"
-                )
-                patch_features = patch_features.reshape(
-                    patch_features.shape[0], -1, patch_features.shape[1]
-                ).permute(0, 2, 1)  # Reshape to (B, num_patches, dim)
 
-                # Append resized targets and patch features
                 resized_target = F.interpolate(
-                    target.float(),
-                    size=(val_spatial_resolution, val_spatial_resolution),
-                    mode="nearest"
+                    target.float(), size=(val_spatial_resolution, val_spatial_resolution), mode="nearest"
                 ).long()
+
+                feature_group.append(spatial_features)
                 targets.append(resized_target)
-                feature_group.append(patch_features)
 
-            # Concatenate all patch features and targets
-            eval_features = torch.cat(feature_group, dim=0)  # (B, num_patches, dim)
-            eval_targets = torch.cat(targets, dim=0)  # (B, H, W)
+            eval_features = torch.cat(feature_group, dim=0)
+            eval_targets = torch.cat(targets, dim=0)
 
-            B, num_patches, dim = eval_features.shape
-            eval_features_flat = eval_features.reshape(-1, dim)  # Flatten for clustering
-            cluster_maps_flat = clustering_method.cluster(eval_features_flat)  # (B * num_patches,)
-            cluster_maps = cluster_maps_flat.reshape(B, val_spatial_resolution, val_spatial_resolution).unsqueeze(1)
+            eval_features = eval_features.permute(0, 2, 3, 1).reshape(eval_features.shape[0], -1, eval_features.shape[1])
+            cluster_maps = clustering_method.cluster(eval_features)
 
             valid_idx = eval_targets != 255
-            valid_target = eval_targets[valid_idx]
-            valid_cluster_maps = cluster_maps[valid_idx]
-            metric.update(valid_target, valid_cluster_maps)
+            metric.update(eval_targets[valid_idx], cluster_maps[valid_idx])
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
 
