@@ -151,7 +151,7 @@ class FCNHead(BaseDecodeHead):
     
 
 class FeatureExtractor(torch.nn.Module):
-    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768, model_type="dino", num_registers=0):
+    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768, model_type="dino", num_registers=8):
         super().__init__()
         self.model = vit_model
         self.eval_spatial_resolution = eval_spatial_resolution
@@ -212,33 +212,25 @@ class FeatureExtractor(torch.nn.Module):
         bs = imgs.size(0)
 
         if self.model_type == "registers":
-            # Add register tokens to the input sequence
-            register_tokens = self.register_tokens.expand(bs, -1, -1)  
-            # should be (batch_size, num_registers, d_model)
-
-            # Process input and concatenate with registers
-            if hasattr(self.model, "get_intermediate_layers"):
-                features = self.model.get_intermediate_layers(imgs)[0]
-                features = features[:, 1:]  # Exclude CLS token !!
-            else:
-                features = self.model.forward_features(imgs)["x_norm_patchtokens"]
-            
-            features = torch.cat((register_tokens, features), dim=1)  
-            # should be (batch_size, num_registers, d_model)
-            normalized_cls_attention = None
+            # Add register tokens
+            register_tokens = self.register_tokens.expand(bs, -1, -1)  # (batch_size, num_registers, d_model)
+            features = self.model.forward_features(imgs)["x_norm_patchtokens"]
+            features_with_registers = torch.cat((register_tokens, features), dim=1)
+            return features_with_registers, register_tokens
         elif self.model_type == "dino":
             try:
                 ## for the backbones that does not support the function
                 features = self.model.get_intermediate_layers(imgs)[0]
                 features = features[:, 1:]
                 normalized_cls_attention = self.model.get_last_selfattention(imgs)
+                return features, normalized_cls_attention
             except:
                 features = self.model.forward_features(imgs)[:, 1:]
                 normalized_cls_attention = None
         elif self.model_type == "dinov2":
             features = self.model.forward_features(imgs)["x_norm_patchtokens"]
             normalized_cls_attention = None
-        return features, normalized_cls_attention
+        return features, None
 
 
 

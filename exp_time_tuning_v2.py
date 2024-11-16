@@ -47,9 +47,15 @@ class TimeTuningV2(torch.nn.Module):
         self.input_size = input_size
         if model_type == 'dino':
             self.eval_spatial_resolution = input_size // 16
-        elif model_type == 'dinov2' or model_type == 'registers':
+        elif model_type in ['dinov2', 'registers']:
             self.eval_spatial_resolution = input_size // 14
-        self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution, d_model=384, model_type=model_type)
+        self.feature_extractor = FeatureExtractor(
+            vit_model,
+            eval_spatial_resolution=self.eval_spatial_resolution,
+            d_model=384,
+            model_type=model_type,
+            num_registers=8 if model_type == "registers" else 0,
+        )
         self.FF = FeatureForwarder(self.eval_spatial_resolution, context_frames, context_window, topk=topk, feature_head=None)
         self.logger = logger
         self.num_prototypes = num_prototypes
@@ -78,33 +84,37 @@ class TimeTuningV2(torch.nn.Module):
             self.prototypes.copy_(w)
             
 
-
-
     def train_step(self, datum):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
         denormalized_video = denormalize_video(datum)
-        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))
+        dataset_features, register_tokens = self.feature_extractor.forward_features(datum.flatten(0, 1))
         _, np, dim = dataset_features.shape
         target_scores_group = []
         q_group = []
+        if self.model_type == "registers":
+            all_features = dataset_features
 
-        projected_dataset_features = self.mlp_head(dataset_features)
+            # Exclude registers for reshaping 
+            patch_features = dataset_features[:, self.feature_extractor.num_registers:]
+        else:
+            patch_features = dataset_features
+        projected_dataset_features = self.mlp_head(patch_features)
         projected_dim = projected_dataset_features.shape[-1]
         projected_dataset_features = projected_dataset_features.reshape(-1, projected_dim)
         normalized_projected_features = F.normalize(projected_dataset_features, dim=-1, p=2)
 
         dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features , self.prototypes)
         dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
-        dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
-        dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
+        dataset_q = dataset_q.reshape(bs, nf,  patch_features.shape[1], self.num_prototypes)
+        dataset_scores = dataset_scores.reshape(bs, nf, patch_features.shape[1], self.num_prototypes)
         dataset_first_frame_q = dataset_q[:, 0, :, :]
         dataset_first_frame_scores = dataset_scores[:, 0, :, :]
         dataset_target_frame_scores = dataset_scores[:, -1, :, :]
         dataset_first_frame_q = dataset_first_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2).float()
-        dataset_features = dataset_features.reshape(bs, nf, np, dim)
+        patch_features = patch_features.reshape(bs, nf, patch_features.shape[1], dim)
         loss = 0
-        for i, clip_features in enumerate(dataset_features):
+        for i, clip_features in enumerate(patch_features):
             q = dataset_first_frame_q[i]
             target_frame_scores = dataset_target_frame_scores[i]
             prediction = self.FF.forward(clip_features, q)
@@ -153,8 +163,14 @@ class TimeTuningV2(torch.nn.Module):
     def validate_step(self, img):
         self.feature_extractor.eval()
         with torch.no_grad():
-            spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
-        return spatial_features
+            features, register_tokens = self.feature_extractor.forward_features(img)
+
+            if self.model_type == "registers":
+                patch_features = features[:, self.feature_extractor.num_registers:]
+            else:
+                patch_features = features
+
+            return patch_features, register_tokens
 
     def save(self, path):
         torch.save(self.state_dict(), path)
@@ -276,14 +292,18 @@ class TimeTuningV2Trainer():
             for i, (x, y) in enumerate(self.test_dataloader):
                 target = (y * 255).long()
                 img = x.to(self.device)
-                spatial_features = self.time_tuning_model.validate_step(img)  # (B, np, dim)
+                spatial_features, register_tokens = self.time_tuning_model.validate_step(img)
+
+                # Exclude registers if using  "registers"
+                if self.time_tuning_model.model_type == "registers":
+                    spatial_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
                 resized_target =  F.interpolate(target.float(), size=(val_spatial_resolution, val_spatial_resolution), mode="nearest").long()
                 targets.append(resized_target)
                 feature_group.append(spatial_features)
             eval_features = torch.cat(feature_group, dim=0)
             eval_targets = torch.cat(targets, dim=0)
-            B, np, dim = eval_features.shape
-            eval_features = eval_features.reshape(eval_features.shape[0], feature_spatial_resolution, feature_spatial_resolution, dim)
+            B, seq_len, dim = eval_features.shape
+            eval_features = eval_features.reshape(B, feature_spatial_resolution, feature_spatial_resolution, dim)
             eval_features = eval_features.permute(0, 3, 1, 2).contiguous()
             eval_features = F.interpolate(eval_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear")
             eval_features = eval_features.reshape(B, dim, -1).permute(0, 2, 1)
@@ -296,15 +316,12 @@ class TimeTuningV2Trainer():
             metric.update(valid_target, valid_cluster_maps)
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
-            # print(f"Epoch : {epoch}, eval finished, miou: {jac}")
-            checkpoint_dir = "checkpoints"
-            if not os.path.exists(checkpoint_dir):
-                os.makedirs(checkpoint_dir)
 
             #threshold = 0.143
             if jac > self.best_miou:
                 self.best_miou = jac
-                #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
+                checkpoint_dir = "checkpoints"
+                os.makedirs(checkpoint_dir, exist_ok=True)
                 save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
