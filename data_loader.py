@@ -1008,8 +1008,6 @@ class VOCDataset(Dataset):
         self.images = [os.path.join(image_dir, x + ".jpg") for x in file_names]
         self.masks = [os.path.join(seg_dir, x + ".png") for x in file_names]
         self.return_masks = return_masks
-        print(f'masks: {self.masks}')
-        print(f'images: {self.images}')
         assert all([Path(f).is_file() for f in self.masks]) and all([Path(f).is_file() for f in self.images])
 
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
