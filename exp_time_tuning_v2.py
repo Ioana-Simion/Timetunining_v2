@@ -280,27 +280,24 @@ class TimeTuningV2Trainer():
             for i, (x, y) in enumerate(self.test_dataloader):
                 target = (y * 255).long()
                 img = x.to(self.device)
-                spatial_features, register_tokens = self.time_tuning_model.validate_step(img)
 
-                # Handle registers
-                if self.time_tuning_model.model_type == "registers":
-                    patch_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
-                    registers = spatial_features[:, :self.time_tuning_model.feature_extractor.num_registers]
-                else:
-                    patch_features = spatial_features
-                    registers = None
-
+                # Extract spatial features
+                spatial_features, _ = self.time_tuning_model.validate_step(img)
+                patch_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
+                
                 # Calculate dynamic spatial resolution
                 num_patches = patch_features.shape[1]
                 dynamic_spatial_resolution = int(num_patches**0.5)
 
-                # Ensure patch features can be reshaped into a grid
+                # Ensure reshaping is valid
                 assert dynamic_spatial_resolution**2 == num_patches, (
-                    f"Cannot reshape features of length {num_patches} into a grid of size {dynamic_spatial_resolution}x{dynamic_spatial_resolution}."
+                    f"Cannot reshape features of length {num_patches} into a grid."
                 )
 
                 # Reshape patch features for clustering
-                patch_features = patch_features.reshape(patch_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1).permute(0, 3, 1, 2).contiguous()  # (B, dim, H, W)
+                patch_features = patch_features.reshape(
+                    patch_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1
+                ).permute(0, 3, 1, 2).contiguous()
                 patch_features = F.interpolate(
                     patch_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear"
                 )
@@ -316,15 +313,21 @@ class TimeTuningV2Trainer():
                 feature_group.append(patch_features)
             eval_features = torch.cat(feature_group, dim=0)
             eval_targets = torch.cat(targets, dim=0)
-            eval_features = eval_features.detach().cpu().unsqueeze(1)
-            cluster_maps = clustering_method.cluster(eval_features)
-            cluster_maps = cluster_maps.reshape(eval_features.shape[0], val_spatial_resolution, val_spatial_resolution).unsqueeze(1)
+            eval_features_flat = eval_features.reshape(-1, eval_features.shape[-1])  # Flatten for clustering
+            cluster_maps_flat = clustering_method.cluster(eval_features_flat)  # (N, )
+            B = eval_features.shape[0]
+            cluster_maps = cluster_maps_flat.reshape(B, val_spatial_resolution, val_spatial_resolution)  # Reshape into grid
             valid_idx = eval_targets != 255
             valid_target = eval_targets[valid_idx]
             valid_cluster_maps = cluster_maps[valid_idx]
             metric.update(valid_target, valid_cluster_maps)
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
+
+            print(f"Patch Features Shape: {patch_features.shape}")
+            print(f"Eval Features Shape: {eval_features.shape}")
+            print(f"Cluster Maps Flat Shape: {cluster_maps_flat.shape}")
+            print(f"Cluster Maps Reshaped Shape: {cluster_maps.shape}")
 
             #threshold = 0.143
             if jac > self.best_miou:
