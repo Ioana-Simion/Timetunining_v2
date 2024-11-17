@@ -712,7 +712,6 @@ class SPairDataset(torch.utils.data.Dataset):
         """
         super().__init__()
         assert split in ["train", "valid", "test"]
-        print('starting to get SPair')
         self.root = root
         self.split = split
         self.image_size = image_size
@@ -787,7 +786,6 @@ class SPairDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index, square=True):
         pair_i = self.instances[index]
-        print(pair_i)
         class_name = pair_i["category"]
         class_dict = self.image_annotations[class_name]
         _, view_i, view_j = pair_i["filename"].split(":")[0].split("-")
@@ -833,7 +831,6 @@ class SPairDataset(torch.utils.data.Dataset):
         rel_path = f"JPEGImages/{class_name}/{image_name}.jpg"
         path = os.path.join(self.root, rel_path)
 
-        print(f'path for JPEGImages when loading SPair: {path}')
         with Image.open(path) as f:
             image = np.array(f)
 

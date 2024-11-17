@@ -223,7 +223,6 @@ class KeypointMatchingModule():
 
         #feats = model(images)
         feats, _ = self.model.feature_extractor.forward_features(images)
-        print(f'feats shape: {feats.shape}')
         if isinstance(feats, dict):
             print("using patchtokens")
             feats = feats.get("x_norm_patchtokens", feats)
