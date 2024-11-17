@@ -293,43 +293,53 @@ class TimeTuningV2Trainer():
                 target = (y * 255).long()
                 img = x.to(self.device)
 
-                # Extract features and registers
+                # Extract spatial features and register tokens
                 spatial_features, register_tokens = self.time_tuning_model.validate_step(img)
 
-                # Exclude registers from spatial features for grid reshaping
+                # Exclude registers from features for grid reshaping
                 if self.time_tuning_model.model_type == "registers":
-                    spatial_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
+                    patch_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
+                else:
+                    patch_features = spatial_features
 
-                # Reshape features for clustering
-                num_patches = spatial_features.shape[1]
+                # Reshape patch features for clustering
+                num_patches = patch_features.shape[1]
                 dynamic_spatial_resolution = int(num_patches**0.5)
 
-                # Ensure reshaping is valid
+                # Validate grid reshaping
                 if dynamic_spatial_resolution**2 != num_patches:
-                    print(f"Warning: Cannot reshape features of length {num_patches} into a grid.")
-                    continue  # Skip this batch if reshaping is not possible
+                    print(f"Warning: Cannot reshape features of length {num_patches} into a grid. Skipping batch.")
+                    continue
 
-                spatial_features = spatial_features.reshape(
-                    spatial_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1
+                patch_features = patch_features.reshape(
+                    patch_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1
                 ).permute(0, 3, 1, 2).contiguous()
 
+                # Interpolate patch features and targets
+                patch_features = F.interpolate(
+                    patch_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear"
+                )
                 resized_target = F.interpolate(
                     target.float(), size=(val_spatial_resolution, val_spatial_resolution), mode="nearest"
                 ).long()
 
-                feature_group.append(spatial_features)
+                feature_group.append(patch_features)
                 targets.append(resized_target)
 
             if not feature_group:
                 print("No valid features for clustering in this epoch.")
                 return
 
-            # Concatenate all patch features and targets
+            # Concatenate features and targets
             eval_features = torch.cat(feature_group, dim=0)  # (B, d, H, W)
             eval_targets = torch.cat(targets, dim=0)  # (B, H, W)
 
-            eval_features = eval_features.permute(0, 2, 3, 1).reshape(eval_features.shape[0], -1, eval_features.shape[1])  # (B, num_patches, d)
-            cluster_maps = clustering_method.cluster(eval_features)
+            # Reshape for clustering
+            eval_features = eval_features.permute(0, 2, 3, 1).reshape(eval_features.shape[0], -1, eval_features.shape[1])  # (B, np, d)
+            eval_features = eval_features.unsqueeze(1)  # Add frame dimension (B, 1, np, d)
+
+            # Perform clustering
+            cluster_maps = clustering_method.cluster(eval_features)  # (B, H, W)
 
             valid_idx = eval_targets != 255
             valid_target = eval_targets[valid_idx]
