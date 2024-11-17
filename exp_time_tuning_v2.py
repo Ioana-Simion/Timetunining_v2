@@ -416,7 +416,7 @@ def run(args):
             use_bbox=False,
             image_size=224,
             image_mean="imagenet",
-            class_name=list(CLASS_IDS.keys()),
+            class_name= None, # loop over classes in val if we want a per class recall
             num_instances=100,
             vp_diff=vp_diff,
         )

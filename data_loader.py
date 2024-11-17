@@ -752,14 +752,9 @@ class SPairDataset(torch.utils.data.Dataset):
 
         instances = self.get_pair_annotations()
         #print(f'instances: {instances}')
-        categories = set(_a["category"] for _a in instances)
-        print(f"Categories found in data: {categories}")
-
 
         if class_name:
-            print(f'class_name: {class_name}')
             c_insts = [_a for _a in instances if _a["category"] == class_name]
-            print(f'c_insts: {c_insts}')
             instances = c_insts
 
         if vp_diff is not None:
