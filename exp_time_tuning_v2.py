@@ -293,57 +293,61 @@ class TimeTuningV2Trainer():
                 target = (y * 255).long()
                 img = x.to(self.device)
 
-                # Extract spatial features and register tokens
-                spatial_features, register_tokens = self.time_tuning_model.validate_step(img)
+                # Extract spatial features
+                spatial_features, _ = self.time_tuning_model.validate_step(img)
 
-                # Exclude registers from features for grid reshaping
                 if self.time_tuning_model.model_type == "registers":
                     patch_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
                 else:
                     patch_features = spatial_features
 
-                # Reshape patch features for clustering
                 num_patches = patch_features.shape[1]
                 dynamic_spatial_resolution = int(num_patches**0.5)
-
-                # Validate grid reshaping
-                if dynamic_spatial_resolution**2 != num_patches:
-                    print(f"Warning: Cannot reshape features of length {num_patches} into a grid. Skipping batch.")
-                    continue
+                assert dynamic_spatial_resolution**2 == num_patches, (
+                    f"Cannot reshape features of length {num_patches} into a grid."
+                )
 
                 patch_features = patch_features.reshape(
                     patch_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1
                 ).permute(0, 3, 1, 2).contiguous()
-
-                # Interpolate patch features and targets
                 patch_features = F.interpolate(
                     patch_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear"
                 )
-                resized_target = F.interpolate(
-                    target.float(), size=(val_spatial_resolution, val_spatial_resolution), mode="nearest"
-                ).long()
+                patch_features = patch_features.reshape(
+                    patch_features.shape[0], val_spatial_resolution, val_spatial_resolution, -1
+                ).permute(0, 3, 1, 2)  # Reshape to (B, d, H, W)
 
-                feature_group.append(patch_features)
+                resized_target = F.interpolate(
+                    target.float(),
+                    size=(val_spatial_resolution, val_spatial_resolution),
+                    mode="nearest"
+                ).long()
                 targets.append(resized_target)
+                feature_group.append(patch_features)
 
             if not feature_group:
                 print("No valid features for clustering in this epoch.")
                 return
 
-            # Concatenate features and targets
             eval_features = torch.cat(feature_group, dim=0)  # (B, d, H, W)
             eval_targets = torch.cat(targets, dim=0)  # (B, H, W)
 
-            # Reshape for clustering
-            eval_features = eval_features.permute(0, 2, 3, 1).reshape(eval_features.shape[0], -1, eval_features.shape[1])  # (B, np, d)
+            B, d, H, W = eval_features.shape
+            eval_features = eval_features.permute(0, 2, 3, 1).reshape(B, H * W, d)  # (B, np, d)
             eval_features = eval_features.unsqueeze(1)  # Add frame dimension (B, 1, np, d)
 
             # Perform clustering
-            cluster_maps = clustering_method.cluster(eval_features)  # (B, H, W)
+            cluster_maps = clustering_method.cluster(eval_features)  # (B, np, num_classes)
 
+            # Reshape cluster_maps to match spatial resolution
+            cluster_maps = cluster_maps.reshape(B, val_spatial_resolution, val_spatial_resolution).unsqueeze(1)
+
+            # Indexing with valid_idx
             valid_idx = eval_targets != 255
             valid_target = eval_targets[valid_idx]
             valid_cluster_maps = cluster_maps[valid_idx]
+
+            # Metric computation
             metric.update(valid_target, valid_cluster_maps)
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
