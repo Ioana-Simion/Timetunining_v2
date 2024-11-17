@@ -754,7 +754,9 @@ class SPairDataset(torch.utils.data.Dataset):
         #print(f'instances: {instances}')
 
         if class_name:
+            print(f'class_name: {class_name}')
             c_insts = [_a for _a in instances if _a["category"] == class_name]
+            print(f'c_insts: {c_insts}')
             instances = c_insts
 
         if vp_diff is not None:
