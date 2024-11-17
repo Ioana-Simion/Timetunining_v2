@@ -179,7 +179,6 @@ class TimeTuningV2Trainer():
         self.best_miou = 0
         self.best_recall = 0
         self.spair_val = spair_val
-        spair_dataset = None
         if self.spair_val:
             # print(f'spair_data_path: {spair_data_path}')
             # spair_dataset = SPairDataset(
@@ -407,10 +406,10 @@ def run(args):
         video_data_module = VideoDataModule("co3d", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
     video_data_module.make_data_loader()
+    spair_dataset = None
     if args.spair_val:
         print(f'spair_data_path: {args.spair_path}')
-        # Configure `vp_diff` or allow it to be passed as an argument.
-        vp_diff = 0  # or set to `None`, or [0, 1, 2] as needed for your setup
+        vp_diff = None
         spair_dataset = SPairDataset(
             root=args.spair_path,
             split="test",
