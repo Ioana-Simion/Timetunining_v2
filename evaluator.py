@@ -244,7 +244,7 @@ class KeypointMatchingModule():
         kps_j[:, :2] = kps_j[:, :2] / images.shape[-1]
 
         # get correspondences
-        kps_i_ndc = (kps_i[:, :2].float() * 2 - 1)[None, None].cuda()
+        kps_i_ndc = (kps_i[:, :2].float() * 2 - 1)[None, None].unsqueeze(0).unsqueeze(2).to(self.device)
         kp_i_F = nn_F.grid_sample(
             feats_i[None, :], kps_i_ndc, mode="bilinear", align_corners=True
         )
