@@ -277,7 +277,7 @@ class KeypointMatchingModule():
 
     def evaluate_dataset(self, dataset, thresh, verbose=False):
         pbar = tqdm(range(len(dataset)), ncols=60) if verbose else range(len(dataset))
-        error_output = [self.compute_errors(self.model, dataset.__getitem__(i)) for i in pbar]
+        error_output = [self.compute_errors(self.dataset[i]) for i in pbar]
 
         errors = torch.cat([_err[0] for _err in error_output])
         src_ind = torch.cat([_err[2] for _err in error_output])
