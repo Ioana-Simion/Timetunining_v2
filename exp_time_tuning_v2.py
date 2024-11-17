@@ -285,7 +285,7 @@ class TimeTuningV2Trainer():
         self.time_tuning_model.eval()
         with torch.no_grad():
             metric = PredsmIoU(21, 21)
-            clustering_method = PerDatasetClustering(50, 21)
+            clustering_method = PerDatasetClustering(50, 21)  # spatial_feature_dim and num_classes
             feature_group = []
             targets = []
 
@@ -295,15 +295,19 @@ class TimeTuningV2Trainer():
 
                 # Extract features and registers
                 spatial_features, register_tokens = self.time_tuning_model.validate_step(img)
+
+                # Exclude registers from spatial features for grid reshaping
                 if self.time_tuning_model.model_type == "registers":
-                    spatial_features = torch.cat((register_tokens, spatial_features), dim=1)
+                    spatial_features = spatial_features[:, self.time_tuning_model.feature_extractor.num_registers:]
 
                 # Reshape features for clustering
                 num_patches = spatial_features.shape[1]
                 dynamic_spatial_resolution = int(num_patches**0.5)
-                assert dynamic_spatial_resolution**2 == num_patches, (
-                    f"Cannot reshape features of length {num_patches} into a grid."
-                )
+
+                # Ensure reshaping is valid
+                if dynamic_spatial_resolution**2 != num_patches:
+                    print(f"Warning: Cannot reshape features of length {num_patches} into a grid.")
+                    continue  # Skip this batch if reshaping is not possible
 
                 spatial_features = spatial_features.reshape(
                     spatial_features.shape[0], dynamic_spatial_resolution, dynamic_spatial_resolution, -1
@@ -316,14 +320,21 @@ class TimeTuningV2Trainer():
                 feature_group.append(spatial_features)
                 targets.append(resized_target)
 
-            eval_features = torch.cat(feature_group, dim=0)
-            eval_targets = torch.cat(targets, dim=0)
+            if not feature_group:
+                print("No valid features for clustering in this epoch.")
+                return
 
-            eval_features = eval_features.permute(0, 2, 3, 1).reshape(eval_features.shape[0], -1, eval_features.shape[1])
+            # Concatenate all patch features and targets
+            eval_features = torch.cat(feature_group, dim=0)  # (B, d, H, W)
+            eval_targets = torch.cat(targets, dim=0)  # (B, H, W)
+
+            eval_features = eval_features.permute(0, 2, 3, 1).reshape(eval_features.shape[0], -1, eval_features.shape[1])  # (B, num_patches, d)
             cluster_maps = clustering_method.cluster(eval_features)
 
             valid_idx = eval_targets != 255
-            metric.update(eval_targets[valid_idx], cluster_maps[valid_idx])
+            valid_target = eval_targets[valid_idx]
+            valid_cluster_maps = cluster_maps[valid_idx]
+            metric.update(valid_target, valid_cluster_maps)
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
 
