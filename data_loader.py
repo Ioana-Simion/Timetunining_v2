@@ -751,7 +751,7 @@ class SPairDataset(torch.utils.data.Dataset):
         )
 
         instances = self.get_pair_annotations()
-        print(f'instances: {instances}')
+        #print(f'instances: {instances}')
 
         if class_name:
             c_insts = [_a for _a in instances if _a["category"] == class_name]
@@ -766,6 +766,7 @@ class SPairDataset(torch.utils.data.Dataset):
             instances = instances[:num_instances]
 
         self.instances = instances
+        print(f'instances: {instances}')
         self.image_annotations = self.get_image_annotations()
 
     def process_keypoints(self, kp_dict, bbox, num_kps=None):
