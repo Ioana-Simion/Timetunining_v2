@@ -88,62 +88,71 @@ class TimeTuningV2(torch.nn.Module):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
         denormalized_video = denormalize_video(datum)
-
-        # Extract features and registers
         dataset_features, register_tokens = self.feature_extractor.forward_features(datum.flatten(0, 1))
-        if self.model_type == "registers":
-            dataset_features = torch.cat((register_tokens, dataset_features), dim=1)
-
         _, np, dim = dataset_features.shape
         target_scores_group = []
         q_group = []
 
+        # Pass features through the MLP head and normalize
         projected_dataset_features = self.mlp_head(dataset_features)
         projected_dim = projected_dataset_features.shape[-1]
-        normalized_projected_features = F.normalize(
-            projected_dataset_features.reshape(-1, projected_dim), dim=-1, p=2
-        )
+        projected_dataset_features = projected_dataset_features.reshape(-1, projected_dim)
+        normalized_projected_features = F.normalize(projected_dataset_features, dim=-1, p=2)
 
-        dataset_scores = torch.einsum("bd,nd->bn", normalized_projected_features, self.prototypes)
+        # Compute dataset scores and assignments
+        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features, self.prototypes)
         dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
         dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
         dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
 
+        # Process the first frame
         dataset_first_frame_q = dataset_q[:, 0, :, :]
+        dataset_first_frame_scores = dataset_scores[:, 0, :, :]
         dataset_target_frame_scores = dataset_scores[:, -1, :, :]
 
+        # Handle reshaping of dataset_first_frame_q
+        dataset_first_frame_q = dataset_first_frame_q.reshape(bs, -1, self.num_prototypes)  # Flatten spatial dimensions
+        dynamic_spatial_resolution = int((dataset_first_frame_q.shape[1])**0.5)
+
+        # Ensure reshaping is valid
+        assert dynamic_spatial_resolution**2 == dataset_first_frame_q.shape[1], (
+            f"Cannot reshape features of length {dataset_first_frame_q.shape[1]} into a grid."
+        )
+
         dataset_first_frame_q = dataset_first_frame_q.reshape(
-            bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+            bs, dynamic_spatial_resolution, dynamic_spatial_resolution, self.num_prototypes
         ).permute(0, 3, 1, 2).float()
 
+        # Reshape dataset features
         dataset_features = dataset_features.reshape(bs, nf, np, dim)
         loss = 0
 
         for i, clip_features in enumerate(dataset_features):
             q = dataset_first_frame_q[i]
             target_frame_scores = dataset_target_frame_scores[i]
-            prediction = self.FF.forward(clip_features, q)
-            propagated_q = torch.stack(prediction, dim=0)[-1]
 
+            # Forward pass through the Feature Forwarder
+            prediction = self.FF.forward(clip_features, q)
+            prediction = torch.stack(prediction, dim=0)
+            propagated_q = prediction[-1]
+
+            # Reshape target frame scores for comparison
             target_frame_scores = target_frame_scores.reshape(
-                self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+                dynamic_spatial_resolution, dynamic_spatial_resolution, self.num_prototypes
             ).permute(2, 0, 1).float()
 
+            # Collect target scores and predictions
             target_scores_group.append(target_frame_scores)
             q_group.append(propagated_q)
-            ## visualize the clustering
-            # cluster_map = torch.cat([q.unsqueeze(0), prediction], dim=0)
-            # cluster_map = cluster_map.argmax(dim=1)
-            # resized_cluster_map = F.interpolate(cluster_map.float().unsqueeze(0), size=(h, w), mode="nearest").squeeze(0)
-            # _, overlayed_images = overlay_video_cmap(resized_cluster_map, denormalized_video[i])
-            # convert_list_to_video(overlayed_images.detach().cpu().permute(0, 2, 3, 1).numpy(), f"Temp/overlayed_{i}.mp4", speed=1000/ nf)
-        
 
+        # Compute loss
         target_scores = torch.stack(target_scores_group, dim=0)
-        propagated_q_group = torch.stack(q_group, dim=0).argmax(dim=1)
+        propagated_q_group = torch.stack(q_group, dim=0)
+        propagated_q_group = propagated_q_group.argmax(dim=1)
         clustering_loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
 
         return clustering_loss
+
 
 
     def get_params_dict(self, model, exclude_decay=True, lr=1e-4):
