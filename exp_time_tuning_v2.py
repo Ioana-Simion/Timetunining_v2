@@ -49,7 +49,13 @@ class TimeTuningV2(torch.nn.Module):
             self.eval_spatial_resolution = input_size // 16
         elif model_type in ['dinov2', 'registers']:
             self.eval_spatial_resolution = input_size // 14
-        self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution, d_model=384, model_type=model_type,num_registers=8 if model_type == "registers" else 0,)
+        self.feature_extractor = FeatureExtractor(
+            vit_model,
+            eval_spatial_resolution=self.eval_spatial_resolution,
+            d_model=384,
+            model_type=model_type,
+            num_registers=8 if model_type == "registers" else 0,
+        )
         self.FF = FeatureForwarder(self.eval_spatial_resolution, context_frames, context_window, topk=topk, feature_head=None)
         self.logger = logger
         self.num_prototypes = num_prototypes
@@ -63,68 +69,65 @@ class TimeTuningV2(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(512, 256),
         )
-        # self.lc = torch.nn.Linear(self.feature_extractor.d_model, self.eval_spatial_resolution ** 2)
         self.feature_extractor.freeze_feature_extractor(["blocks.11", "blocks.10"])
         prototype_init = torch.randn((num_prototypes, 256))
-        prototype_init =  F.normalize(prototype_init, dim=-1, p=2)  
+        prototype_init = F.normalize(prototype_init, dim=-1, p=2)
         self.prototypes = torch.nn.Parameter(prototype_init)
         self.model_type = model_type
-    
 
     def normalize_prototypes(self):
         with torch.no_grad():
             w = self.prototypes.data.clone()
             w = F.normalize(w, dim=1, p=2)
             self.prototypes.copy_(w)
-            
-
-
 
     def train_step(self, datum):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
-        denormalized_video = denormalize_video(datum)
-        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))
-        _, np, dim = dataset_features.shape
+        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
+        if self.model_type == "registers":
+            # Separate patch tokens and register tokens
+            patch_tokens = dataset_features[:, :-8, :]  # Last 8 are registers
+        else:
+            patch_tokens = dataset_features
+
+        _, np, dim = patch_tokens.shape
         target_scores_group = []
         q_group = []
 
-        projected_dataset_features = self.mlp_head(dataset_features)
-        projected_dim = projected_dataset_features.shape[-1]
-        projected_dataset_features = projected_dataset_features.reshape(-1, projected_dim)
-        normalized_projected_features = F.normalize(projected_dataset_features, dim=-1, p=2)
+        projected_patch_features = self.mlp_head(patch_tokens)
+        projected_dim = projected_patch_features.shape[-1]
+        projected_patch_features = projected_patch_features.reshape(-1, projected_dim)
+        normalized_projected_features = F.normalize(projected_patch_features, dim=-1, p=2)
 
-        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features , self.prototypes)
+        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features, self.prototypes)
         dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
         dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
         dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
         dataset_first_frame_q = dataset_q[:, 0, :, :]
-        dataset_first_frame_scores = dataset_scores[:, 0, :, :]
         dataset_target_frame_scores = dataset_scores[:, -1, :, :]
-        dataset_first_frame_q = dataset_first_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2).float()
-        dataset_features = dataset_features.reshape(bs, nf, np, dim)
-        loss = 0
-        for i, clip_features in enumerate(dataset_features):
+        dataset_first_frame_q = dataset_first_frame_q.reshape(
+            bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+        ).permute(0, 3, 1, 2).float()
+
+        patch_tokens = patch_tokens.reshape(bs, nf, np, dim)
+        for i, clip_features in enumerate(patch_tokens):
             q = dataset_first_frame_q[i]
             target_frame_scores = dataset_target_frame_scores[i]
             prediction = self.FF.forward(clip_features, q)
             prediction = torch.stack(prediction, dim=0)
             propagated_q = prediction[-1]
-            target_frame_scores = target_frame_scores.reshape(self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(2, 0, 1).float()
+            target_frame_scores = target_frame_scores.reshape(
+                self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+            ).permute(2, 0, 1).float()
             target_scores_group.append(target_frame_scores)
             q_group.append(propagated_q)
-            ## visualize the clustering
-            # cluster_map = torch.cat([q.unsqueeze(0), prediction], dim=0)
-            # cluster_map = cluster_map.argmax(dim=1)
-            # resized_cluster_map = F.interpolate(cluster_map.float().unsqueeze(0), size=(h, w), mode="nearest").squeeze(0)
-            # _, overlayed_images = overlay_video_cmap(resized_cluster_map, denormalized_video[i])
-            # convert_list_to_video(overlayed_images.detach().cpu().permute(0, 2, 3, 1).numpy(), f"Temp/overlayed_{i}.mp4", speed=1000/ nf)
-        
+
         target_scores = torch.stack(target_scores_group, dim=0)
         propagated_q_group = torch.stack(q_group, dim=0)
         propagated_q_group = propagated_q_group.argmax(dim=1)
-        clustering_loss = self.criterion(target_scores  / 0.1, propagated_q_group.long())
-        
+        clustering_loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
+
         return clustering_loss
     
 
@@ -148,12 +151,13 @@ class TimeTuningV2(torch.nn.Module):
         all_params = feature_extractor_params + mlp_head_params + prototypes_params
         return all_params
 
-
-
     def validate_step(self, img):
         self.feature_extractor.eval()
         with torch.no_grad():
             spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
+            if self.model_type == "registers":
+                # Exclude registers during validation
+                spatial_features = spatial_features[:, :-8, :]  # Last 8 are registers
         return spatial_features
 
     def save(self, path):
