@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import StepLR
 from eval_metrics import PredsmIoU
 from clustering import PerDatasetClustering
-import torch.nn.functional as F
+import torch.nn.functional as nn_F
 
 import torch
 from einops import einsum
@@ -210,66 +210,90 @@ class KeypointMatchingModule():
         self.threshold = threshold
         self.model.to(self.device)
         self.model.eval()
-
-    def compute_errors(self, instance):
-        img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, *rest = instance
-        print(f'img_i shape: {img_i.shape}')
-        print(f'img_j shape: {img_j.shape}')
+    
+    def compute_errors(self, instance, mask_feats=False, return_heatmaps=False):
+        img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, _ = instance
         mask_i = torch.tensor(np.array(mask_i, dtype=float))
         mask_j = torch.tensor(np.array(mask_j, dtype=float))
 
-        images = torch.stack((img_i, img_j)).to(self.device)
-        masks = torch.stack((mask_i, mask_j)).to(self.device)
-        masks = F.avg_pool2d(masks.float(), 16)
+        images = torch.stack((img_i, img_j)).cuda()
+        masks = torch.stack((mask_i, mask_j)).cuda()
+        masks = torch.nn.functional.avg_pool2d(masks.float(), 16)
         masks = masks > 4 / (16**2)
 
+        #feats = model(images)
         feats, _ = self.model.feature_extractor.forward_features(images)
         print(f'feats shape: {feats.shape}')
-        batch_size, num_patches, channels = feats.shape
-        grid_size = int(num_patches ** 0.5)
+        
+        if isinstance(feats, list):
+            feats = torch.cat(feats, dim=1)
 
-        if grid_size ** 2 == num_patches:
-            feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
-        else:
-            print(f"Unexpected number of patches ({num_patches}) for reshaping.")
+        feats = nn_F.normalize(feats, p=2, dim=1)
 
-        feats = F.normalize(feats, p=2, dim=1)
-        feats_i, feats_j = feats[0], feats[1]
-        print(f'kps_i: {kps_i}')
-        print(f'kps_j: {kps_j}')
-        # Normalize keypoints to range [0, 1]
-        kps_i = kps_i.float() / images.shape[-1]
-        kps_j = kps_j.float() / images.shape[-1]
-        print(f'kps_i after normalization: {kps_i}')
-        print(f'kps_j after normalization: {kps_j}')
+        if mask_feats:
+            feats = feats * masks
 
-        # Convert keypoints to normalized device coordinates
-        kps_i_ndc = (kps_i[:, :2] * 2 - 1).unsqueeze(0).unsqueeze(0).to(self.device)
+        feats_i = feats[0]
+        feats_j = feats[1]
 
-        # Sample features at keypoint locations
-        kp_i_F = F.grid_sample(feats_i.unsqueeze(0), kps_i_ndc, mode="bilinear", align_corners=True)[0, :, 0].t()
+        # normalize kps to [0, 1]
+        assert images.shape[-1] == images.shape[-2], "assuming square images here"
+        kps_i = kps_i.float()
+        kps_j = kps_j.float()
+        kps_i[:, :2] = kps_i[:, :2] / images.shape[-1]
+        kps_j[:, :2] = kps_j[:, :2] / images.shape[-1]
 
-        # Compute heatmaps and find corresponding keypoints
+        # get correspondences
+        kps_i_ndc = (kps_i[:, :2].float() * 2 - 1)[None, None].cuda()
+        kp_i_F = nn_F.grid_sample(
+            feats_i[None, :], kps_i_ndc, mode="bilinear", align_corners=True
+        )
+        kp_i_F = kp_i_F[0, :, 0].t()
+
+        # get max index in [0,1] range
         heatmaps = einsum(kp_i_F, feats_j, "k f, f h w -> k h w")
         pred_kp = argmax_2d(heatmaps, max_value=True).float().cpu() / feats.shape[-1]
 
+        # compute error and scale to threshold (for all pairs)
         errors = (pred_kp[:, None, :] - kps_j[None, :, :2]).norm(p=2, dim=-1)
-        errors /= (self.threshold + 1e-6)  # ensure no division by zero
-        print('kps_i[:, 2] {kps_i[:, 2]}')
-        print('kps_j[:, 2] {kps_j[:, 2]}')
-        # Mask valid keypoints
-        valid_kps = (kps_i[:, 2] * kps_j[:, 2]).unsqueeze(1) == 1
-        valid_kps = valid_kps.expand(len(kps_i), len(kps_j))
+        errors = errors / thresh_scale
+
+        # only retain keypoints in both (for now)
+        valid_kps = (kps_i[:, None, 2] * kps_j[None, :, 2]) == 1
         in_both = valid_kps.diagonal()
-        errors[~valid_kps] = 1e3
 
-        if in_both.sum() == 0:
-            print("Warning: No valid keypoints found in both images.")
-            return torch.tensor([]), torch.tensor([])  
-        return errors.diagonal()[in_both], errors[in_both].min(dim=1)[0]
+        # max error should be 1, so this excludes invalid from NN-search
+        errors[valid_kps.logical_not()] = 1e3
+
+        error_same = errors.diagonal()[in_both]
+        error_nn, index_nn = errors[in_both].min(dim=1)
+        index_same = in_both.nonzero().squeeze(1)
+
+        if return_heatmaps:
+            return error_same, error_nn, index_same, index_nn, heatmaps
+        else:
+            return error_same, error_nn, index_same, index_nn
 
 
+    def evaluate_dataset(self, dataset, thresh, verbose=False):
+        pbar = tqdm(range(len(dataset)), ncols=60) if verbose else range(len(dataset))
+        error_output = [self.compute_errors(self.model, dataset.__getitem__(i)) for i in pbar]
 
+        errors = torch.cat([_err[0] for _err in error_output])
+        src_ind = torch.cat([_err[2] for _err in error_output])
+        tgt_ind = torch.cat([_err[3] for _err in error_output])
+
+        # compute confusion matrix
+        kp_max = max(src_ind.max(), tgt_ind.max()) + 1
+        confusion = torch.zeros((kp_max, kp_max))
+        for src, tgt in torch.stack((src_ind, tgt_ind), dim=1):
+            confusion[src, tgt] += 1
+
+        # compute recall
+        recall = (errors < thresh).float().mean().item() * 100.0
+
+        return recall, confusion
+    
     def evaluate(self):
         """
         Evaluate the model on keypoint matching over the dataset.

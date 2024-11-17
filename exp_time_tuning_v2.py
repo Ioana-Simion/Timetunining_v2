@@ -192,6 +192,7 @@ class TimeTuningV2Trainer():
             #         vp_diff=None,
             # )
             # print(f'Length of SPair Dataset: {len(spair_dataset)}')
+            self.spair_dataset = spair_dataset
             self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
 
     
@@ -247,7 +248,7 @@ class TimeTuningV2Trainer():
             #     self.validate(epoch)
             if self.spair_val:
                 if epoch % 2 == 0: # 2 only for debuggingt then we do evey 10/20
-                    recall = self.keypoint_matching_module.evaluate()
+                    recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
                     self.logger.log({"keypoint_matching_recall": recall})
                     print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
                     if recall > self.best_recall:
