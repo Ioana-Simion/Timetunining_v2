@@ -166,7 +166,7 @@ class TimeTuningV2(torch.nn.Module):
         
 
 class TimeTuningV2Trainer():
-    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_data_path='/home/isimion1/probe3d/data/SPair-71k', spair_val=False):
+    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_dataset, spair_val=False):
         self.dataloader = data_module.data_loader
         self.test_dataloader = test_dataloader
         self.time_tuning_model = time_tuning_model
@@ -179,19 +179,20 @@ class TimeTuningV2Trainer():
         self.best_miou = 0
         self.best_recall = 0
         self.spair_val = spair_val
+        spair_dataset = None
         if self.spair_val:
-            print(f'spair_data_path: {spair_data_path}')
-            spair_dataset = SPairDataset(
-                    root=spair_data_path,
-                    split="test",
-                    use_bbox=False,
-                    image_size=224,
-                    image_mean="imagenet",
-                    class_name=list(CLASS_IDS.keys()),
-                    num_instances=100,
-                    vp_diff=None,
-            )
-            print(f'Length of SPair Dataset: {len(spair_dataset)}')
+            # print(f'spair_data_path: {spair_data_path}')
+            # spair_dataset = SPairDataset(
+            #         root=spair_data_path,
+            #         split="test",
+            #         use_bbox=False,
+            #         image_size=224,
+            #         image_mean="imagenet",
+            #         class_name=list(CLASS_IDS.keys()),
+            #         num_instances=100,
+            #         vp_diff=None,
+            # )
+            # print(f'Length of SPair Dataset: {len(spair_dataset)}')
             self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
 
     
@@ -406,7 +407,21 @@ def run(args):
         video_data_module = VideoDataModule("co3d", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
     video_data_module.make_data_loader()
-
+    if args.spair_val:
+        print(f'spair_data_path: {args.spair_data_path}')
+        # Configure `vp_diff` or allow it to be passed as an argument.
+        vp_diff = 0  # or set to `None`, or [0, 1, 2] as needed for your setup
+        spair_dataset = SPairDataset(
+            root=args.spair_data_path,
+            split="test",
+            use_bbox=False,
+            image_size=224,
+            image_mean="imagenet",
+            class_name=list(CLASS_IDS.keys()),
+            num_instances=100,
+            vp_diff=vp_diff,
+        )
+        print(f'Length of SPair Dataset: {len(spair_dataset)}')
     if args.model_type == 'dino':
         vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     elif args.model_type in ['dinov2','registers']:
@@ -429,8 +444,7 @@ def run(args):
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_data_path=
-                                                   args.spair_path, spair_val=args.spair_val)
+    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val)
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 
