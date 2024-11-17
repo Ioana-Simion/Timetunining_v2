@@ -215,10 +215,7 @@ class FeatureExtractor(torch.nn.Module):
             # Add register tokens
             register_tokens = self.register_tokens.expand(bs, -1, -1)  # (batch_size, num_registers, d_model)
             features = self.model.forward_features(imgs)["x_norm_patchtokens"]
-            print(f'features shape: {features.shape}')
             features_with_registers = torch.cat((register_tokens, features), dim=1)
-            print(f'features_with_registers shape: {features_with_registers.shape}')
-            print(f'register_tokens shape: {register_tokens.shape}')
 
             return features_with_registers, register_tokens
         elif self.model_type == "dino":
@@ -233,7 +230,6 @@ class FeatureExtractor(torch.nn.Module):
                 normalized_cls_attention = None
         elif self.model_type == "dinov2":
             features = self.model.forward_features(imgs)["x_norm_patchtokens"]
-            print(f'features shape: {features.shape}')
             normalized_cls_attention = None
         return features, None
 
