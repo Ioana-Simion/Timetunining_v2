@@ -256,7 +256,7 @@ class TimeTuningV2Trainer():
                         checkpoint_dir = "checkpoints"
                         if not os.path.exists(checkpoint_dir):
                             os.makedirs(checkpoint_dir)
-                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}.pth")
+                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}.pth")
                         torch.save(self.time_tuning_model.state_dict(), save_path)
                         print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
                 else:
