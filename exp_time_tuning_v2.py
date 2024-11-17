@@ -408,11 +408,11 @@ def run(args):
     video_data_module.setup(transformations_dict)
     video_data_module.make_data_loader()
     if args.spair_val:
-        print(f'spair_data_path: {args.spair_data_path}')
+        print(f'spair_data_path: {args.spair_path}')
         # Configure `vp_diff` or allow it to be passed as an argument.
         vp_diff = 0  # or set to `None`, or [0, 1, 2] as needed for your setup
         spair_dataset = SPairDataset(
-            root=args.spair_data_path,
+            root=args.spair_path,
             split="test",
             use_bbox=False,
             image_size=224,
