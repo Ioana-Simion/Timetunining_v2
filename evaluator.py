@@ -224,11 +224,32 @@ class KeypointMatchingModule():
         #feats = model(images)
         feats, _ = self.model.feature_extractor.forward_features(images)
         print(f'feats shape: {feats.shape}')
-        
-        if isinstance(feats, list):
-            feats = torch.cat(feats, dim=1)
+        if isinstance(feats, dict):
+            print("using patchtokens")
+            feats = feats.get("x_norm_patchtokens", feats)
+        # if isinstance(feats, list):
+        #     print("using list")
+        #     feats = torch.cat(feats, dim=1)
+        batch_size, num_patches, channels = feats.shape
+        #print(f"batch_size {batch_size} num_patches {num_patches}, channels {channels}")
+        grid_size = int(num_patches ** 0.5)
+
+
+        if grid_size ** 2 == num_patches:
+            # Directly reshape since it forms a square grid
+            feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
+            #print(f"Final reshaped feature shape (no CLS token): {feats.shape}")
+
+        # Case 2: CLS token is included, remove it and reshape
+        elif grid_size ** 2 == num_patches - 1:
+            #print("Removing the CLS token to align shapes.")
+            feats = feats[:, 1:]  # Remove CLS token
+            batch_size, num_patches, channels = feats.shape
+            grid_size = int(num_patches ** 0.5)
+            feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
 
         feats = nn_F.normalize(feats, p=2, dim=1)
+
 
         if mask_feats:
             feats = feats * masks
@@ -244,7 +265,7 @@ class KeypointMatchingModule():
         kps_j[:, :2] = kps_j[:, :2] / images.shape[-1]
 
         # get correspondences
-        kps_i_ndc = (kps_i[:, :2].float() * 2 - 1)[None, None].unsqueeze(0).unsqueeze(2).to(self.device)
+        kps_i_ndc = (kps_i[:, :2].float() * 2 - 1)[None, None].cuda()
         kp_i_F = nn_F.grid_sample(
             feats_i[None, :], kps_i_ndc, mode="bilinear", align_corners=True
         )
