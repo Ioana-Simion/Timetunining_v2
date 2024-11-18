@@ -659,7 +659,8 @@ class CO3DDataset(Dataset):
                 print(f"Warning: {img_path} not found in {zip_file_path}")
 
         if not images:
-            raise ValueError(f"No images found for sequence {sequence} at index {idx}")
+            print(f"No images found for sequence {sequence} cathegory{category} at index {idx}")
+            return None
 
         images_tensor = torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in images])
         return images_tensor
