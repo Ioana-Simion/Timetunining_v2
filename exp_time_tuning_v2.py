@@ -21,6 +21,7 @@ from image_transformations import Compose, Resize
 import video_transformations
 import numpy as np
 import random
+import copy
 
 
 project_name = "TimeTuning_v2"
@@ -193,7 +194,10 @@ class TimeTuningV2Trainer():
             # )
             # print(f'Length of SPair Dataset: {len(spair_dataset)}')
             self.spair_dataset = spair_dataset
-            self.keypoint_matching_module = KeypointMatchingModule(time_tuning_model, spair_dataset, device)
+            #eval_model = copy.deepcopy(self.time_tuning_model)
+            #eval_model.eval()
+
+            #self.keypoint_matching_module = KeypointMatchingModule(eval_model, spair_dataset, device)
 
     
     def setup_optimizer(self, optimization_config):
@@ -248,7 +252,10 @@ class TimeTuningV2Trainer():
             #     self.validate(epoch)
             if self.spair_val:
                 if epoch % 2 == 0: # 2 only for debuggingt then we do evey 10/20
+                    eval_model = copy.deepcopy(self.time_tuning_model)
+                    eval_model.eval()
                     self.time_tuning_model.eval()
+                    self.keypoint_matching_module = KeypointMatchingModule(eval_model, self.spair_dataset, self.device)
                     recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
                     self.logger.log({"keypoint_matching_recall": recall})
                     print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
