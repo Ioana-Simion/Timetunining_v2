@@ -1281,7 +1281,7 @@ class VideoDataModule():
         elif self.name == "co3d":
             print('using CO3D dataset')
             self.dataset = CO3DDataset(
-                subset_name=self.path_dict.get("subset_name", "manyview"),
+                subset_name='manyview_dev_0',
                 sampling_mode=self.sampling_mode,
                 num_clips=self.num_clips,
                 num_frames=self.num_clip_frames,
