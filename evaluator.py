@@ -211,6 +211,7 @@ class KeypointMatchingModule():
         self.model.to(self.device)
         self.model.eval()
     
+    @torch.no_grad()
     def compute_errors(self, instance, mask_feats=False, return_heatmaps=False):
         img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, _ = instance
         mask_i = torch.tensor(np.array(mask_i, dtype=float))
@@ -297,7 +298,7 @@ class KeypointMatchingModule():
         else:
             return error_same, error_nn, index_same, index_nn
 
-
+    @torch.no_grad()
     def evaluate_dataset(self, dataset, thresh, verbose=False):
         pbar = tqdm(range(len(dataset)), ncols=60) if verbose else range(len(dataset))
         error_output = [self.compute_errors(self.dataset[i]) for i in pbar]
@@ -317,6 +318,7 @@ class KeypointMatchingModule():
 
         return recall, confusion
     
+    @torch.no_grad()
     def evaluate(self):
         """
         Evaluate the model on keypoint matching over the dataset.

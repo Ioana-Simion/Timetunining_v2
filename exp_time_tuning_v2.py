@@ -247,7 +247,8 @@ class TimeTuningV2Trainer():
             # if epoch % 1 == 0:
             #     self.validate(epoch)
             if self.spair_val:
-                if epoch % 10 == 0: # 2 only for debuggingt then we do evey 10/20
+                if epoch % 2 == 0: # 2 only for debuggingt then we do evey 10/20
+                    self.time_tuning_model.eval()
                     recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
                     self.logger.log({"keypoint_matching_recall": recall})
                     print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
