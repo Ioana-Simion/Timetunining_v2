@@ -36,6 +36,8 @@ from typing import Any, Callable, List, Optional, Tuple
 from zipfile import ZipFile
 
 import gzip
+from collections import defaultdict
+import io
 
 project_name = "TimeTuning_v2"
 
@@ -555,9 +557,148 @@ def locate_and_load_set_lists(root_directory, zip_mapping_path):
 
     print("Finished creating detailed mapping.")
     return category_data
-    
+
 
 class CO3DDataset(Dataset):
+    def __init__(
+        self, 
+        subset_name, 
+        sampling_mode, 
+        num_clips, 
+        num_frames, 
+        frame_transform=None, 
+        target_transform=None, 
+        video_transform=None, 
+        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping.json"
+    ):
+        """
+        CO3D Dataset loader.
+
+        Args:
+            zip_mapping (dict): Mapping of categories to zip files.
+            subset_name (str): Subset name (e.g., "manyview_dev_0").
+            sampling_mode (str): Sampling mode (e.g., "dense").
+            num_clips (int): Number of clips per sequence.
+            num_frames (int): Number of frames per clip.
+            frame_transform (callable): Transform to apply to each frame.
+            target_transform (callable): Transform to apply to targets.
+            video_transform (callable): Transform to apply to video sequences.
+            mapping_path (str): Path to save/load the frame-to-zip mapping.
+        """
+        super().__init__()
+
+        if not os.path.exists('/home/isimion1/timet/Timetuning_v2/zip_mapping.json'):
+            raise FileNotFoundError(f"zip_mapping.json not found at {'/home/isimion1/timet/Timetuning_v2/zip_mapping.json'}")
+        with open('/home/isimion1/timet/Timetuning_v2/zip_mapping.json', "r") as f:
+            self.zip_mapping = json.load(f)
+        self.subset_name = subset_name
+        self.sampling_mode = sampling_mode
+        self.num_clips = num_clips
+        self.num_frames = num_frames
+        self.frame_transform = frame_transform
+        self.target_transform = target_transform
+        self.video_transform = video_transform
+        self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
+
+    def prepare_data(self, mapping_path):
+        """Parse zips, locate set_lists, and save frame-to-zip mapping."""
+        # Check if the mapping already exists
+        if os.path.exists(mapping_path):
+            print(f"Loading frame-to-zip mapping from {mapping_path}")
+            with open(mapping_path, "r") as f:
+                return json.load(f)
+        
+        print("Creating frame-to-zip mapping...")
+        structure = defaultdict(dict)
+
+        for category, zips in self.zip_mapping.items():
+            structure[category] = {}
+            print(f"Processing category: {category}")
+            
+            # Locate and parse set_lists across zips
+            combined_set_list = {}
+            for zip_file in zips:
+                with ZipFile(zip_file, 'r') as zf:
+                    # Check for relevant set_lists files
+                    set_lists_files = [
+                        f for f in zf.namelist() if f"set_lists/set_lists_{self.subset_name}.json" in f
+                    ]
+                    for set_lists_file in set_lists_files:
+                        with zf.open(set_lists_file) as f:
+                            set_list = json.load(f)
+                        # Combine set_lists data
+                        for sequence, frames in set_list.items():
+                            if sequence not in combined_set_list:
+                                combined_set_list[sequence] = []
+                            combined_set_list[sequence].extend(frames)
+
+            # Map frames to their corresponding zip files
+            for zip_file in zips:
+                with ZipFile(zip_file, 'r') as zf:
+                    for sequence, frames in combined_set_list.items():
+                        if sequence not in structure[category]:
+                            structure[category][sequence] = []
+                        for frame in frames:
+                            # Check if frame exists in the zip
+                            frame_path = f"{sequence}/{frame}"
+                            if frame_path in zf.namelist():
+                                structure[category][sequence].append((frame_path, zip_file))
+        
+        # Save the mapping for future use
+        with open(mapping_path, "w") as f:
+            json.dump(structure, f, indent=4)
+        print(f"Frame-to-zip mapping saved to {mapping_path}")
+        
+        return structure
+
+
+    def stream_file(self, zip_path, file_path):
+        """Stream a file from a zip."""
+        with ZipFile(zip_path, 'r') as zf:
+            with zf.open(file_path) as f:
+                return io.BytesIO(f.read())
+
+    def load_image(self, zip_path, file_path):
+        """Load an image directly from a zip."""
+        file_data = self.stream_file(zip_path, file_path)
+        return Image.open(file_data)
+
+    def __len__(self):
+        """Return the total number of sequences across all categories."""
+        return sum(len(sequences) for sequences in self.dataset_structure.values())
+
+    def __getitem__(self, index):
+        """
+        Get a sample from the dataset.
+
+        Args:
+            index (int): Index of the sample.
+
+        Returns:
+            tuple: (frames, category, sequence_name).
+        """
+        # Find the category and sequence
+        category = list(self.dataset_structure.keys())[index // len(self.dataset_structure)]
+        sequences = self.dataset_structure[category]
+        sequence_name = list(sequences.keys())[index % len(sequences)]
+        frame_info = sequences[sequence_name][:self.num_frames]
+
+        # Load frames from their respective zips
+        frame_images = [
+            self.load_image(zip_path, frame_path) for frame_path, zip_path in frame_info
+        ]
+
+        # Apply transforms
+        if self.frame_transform:
+            frame_images = [self.frame_transform(img) for img in frame_images]
+        if self.video_transform:
+            frame_images = self.video_transform(frame_images)
+
+        frame_images = torch.stack(frame_images)
+        return frame_images, category, sequence_name
+
+
+class CO3DDataset2(Dataset):
     def __init__(self, root_directory, subset_name, sampling_mode, num_clips, num_frames,
                  frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
         super().__init__()
@@ -1140,16 +1281,14 @@ class VideoDataModule():
         elif self.name == "co3d":
             print('using CO3D dataset')
             self.dataset = CO3DDataset(
-                root_directory=self.class_directory, 
-                subset_name=self.subset_name,  # Define subset as "train", "val", or "test"
-                sampling_mode=self.sampling_mode, 
-                num_clips=self.num_clips, 
-                num_frames=self.num_clip_frames, 
-                frame_transform=data_transforms, 
-                target_transform=target_transforms, 
-                video_transform=shared_transforms, 
-                regular_step=self.regular_step
-            )       
+                subset_name=self.path_dict.get("subset_name", "manyview"),
+                sampling_mode=self.sampling_mode,
+                num_clips=self.num_clips,
+                num_frames=self.num_clip_frames,
+                frame_transform=data_transforms,
+                target_transform=target_transforms,
+                video_transform=shared_transforms,
+            )      
         else:
             self.dataset = VideoDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         print(f"Dataset size : {len(self.dataset)}")
