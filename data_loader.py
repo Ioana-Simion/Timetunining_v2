@@ -628,11 +628,12 @@ class CO3DDataset(Dataset):
                         
                         # Process frames in the 'train', 'val', or 'test' split
                         if 'train' in set_list:
-                            for entry in set_list['train' ]:  # Each entry: [sequence_name, frame_index, relative_frame_path]
+                            for entry in set_list['train']:  # Each entry: [sequence_name, frame_index, relative_frame_path]
                                 sequence_name, frame_index, relative_frame_path = entry
                                 if sequence_name not in structure[category]:
+                                    print(f"Not found sequence '{sequence_name}' in category '{structure[category]}'")
                                     structure[category][sequence_name] = []
-                                
+                                print(f"Looking for frame in '{relative_frame_path}'")
                                 # Verify frame existence in the zip
                                 if relative_frame_path in zf.namelist():
                                     structure[category][sequence_name].append((relative_frame_path, zip_file))
