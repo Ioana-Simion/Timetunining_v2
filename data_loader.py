@@ -696,24 +696,46 @@ class CO3DDataset(Dataset):
             tuple: (frames, category, sequence_name).
         """
         # Find the category and sequence
-        category = list(self.dataset_structure.keys())[index // len(self.dataset_structure)]
-        sequences = self.dataset_structure[category]
-        sequence_name = list(sequences.keys())[index % len(sequences)]
-        frame_info = sequences[sequence_name][:self.num_frames]
+        try:
+            category = list(self.dataset_structure.keys())[index // len(self.dataset_structure)]
+            sequences = self.dataset_structure[category]
+            sequence_name = list(sequences.keys())[index % len(sequences)]
+            frame_info = sequences[sequence_name][:self.num_frames]
+
+            # Debug mapping retrieval
+            print(f"Accessing category: {category}, sequence: {sequence_name}")
+            print(f"Frame info: {frame_info}")
+        except IndexError as e:
+            raise ValueError(f"Invalid index {index}. Dataset structure: {self.dataset_structure}") from e
 
         # Load frames from their respective zips
-        frame_images = [
-            self.load_image(zip_path, frame_path) for frame_path, zip_path in frame_info
-        ]
+        frame_images = []
+        for frame_path, zip_path in frame_info:
+            try:
+                img = self.load_image(zip_path, frame_path)
+                frame_images.append(img)
+            except FileNotFoundError as e:
+                print(f"Frame '{frame_path}' not found in '{zip_path}'. Skipping...")
+                continue
 
-        # Apply transforms
+        if not frame_images:
+            raise ValueError(f"No frames could be loaded for sequence '{sequence_name}' in category '{category}'.")
+
+        # Apply frame-level transformations
         if self.frame_transform:
             frame_images = [self.frame_transform(img) for img in frame_images]
+
+        # If video-level transformations are provided, apply to the whole clip
         if self.video_transform:
             frame_images = self.video_transform(frame_images)
 
-        frame_images = torch.stack(frame_images)
+        # Convert the list of images into a single tensor
+        frame_images = torch.stack(
+            [transforms.ToTensor()(img) if isinstance(img, Image.Image) else img for img in frame_images]
+        )
+
         return frame_images, category, sequence_name
+
 
 
 class CO3DDataset2(Dataset):
