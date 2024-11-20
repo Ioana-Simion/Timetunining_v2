@@ -627,8 +627,8 @@ class CO3DDataset(Dataset):
                             set_list = json.load(f)
                         
                         # Process frames in the 'train', 'val', or 'test' split
-                        if self.subset_name in set_list:
-                            for entry in set_list[self.subset_name]:  # Each entry: [sequence_name, frame_index, relative_frame_path]
+                        if 'train' in set_list:
+                            for entry in set_list['train' ]:  # Each entry: [sequence_name, frame_index, relative_frame_path]
                                 sequence_name, frame_index, relative_frame_path = entry
                                 if sequence_name not in structure[category]:
                                     structure[category][sequence_name] = []
