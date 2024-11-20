@@ -646,6 +646,7 @@ class CO3DDataset(Dataset):
                 for zip_file in zips:
                     print(f"Searching for frame '{normalized_frame_path}' in zip '{zip_file}'")
                     with ZipFile(zip_file, 'r') as zf:
+                        print(f'namelist in zips {zf.namelist()}')
                         if normalized_frame_path in zf.namelist():
                             print(f'namelist in zips {zf.namelist()}')
                             structure[category][sequence_name].append((relative_frame_path, zip_file))
