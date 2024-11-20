@@ -734,8 +734,8 @@ class CO3DDataset(Dataset):
         frame_images = torch.stack(
             [transforms.ToTensor()(img) if isinstance(img, Image.Image) else img for img in frame_images]
         )
-
-        return frame_images, category, sequence_name
+        empty_annotation = torch.empty(0)
+        return frame_images, empty_annotation
 
 
 
