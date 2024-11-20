@@ -644,8 +644,10 @@ class CO3DDataset(Dataset):
 
                 # Search for the frame in all zips of the category
                 for zip_file in zips:
+                    print(f"Searching for frame '{normalized_frame_path}' in zip '{zip_file}'")
                     with ZipFile(zip_file, 'r') as zf:
                         if normalized_frame_path in zf.namelist():
+                            print(f'namelist in zips {zf.namelist()}')
                             structure[category][sequence_name].append((relative_frame_path, zip_file))
                             found = True
                             print(f"Frame '{normalized_frame_path}' found in zip '{zip_file}'")
@@ -653,6 +655,7 @@ class CO3DDataset(Dataset):
                 
                 if not found:
                     print(f"Frame '{normalized_frame_path}' NOT found in any zips for category '{category}'")
+                    raise ValueError("Frame not found in any zips")
         
         # Save the mapping for future use
         with open(mapping_path, "w") as f:
