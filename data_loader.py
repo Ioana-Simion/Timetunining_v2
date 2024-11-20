@@ -609,40 +609,33 @@ class CO3DDataset(Dataset):
                 return json.load(f)
         
         print("Creating frame-to-zip mapping...")
-        structure = defaultdict(dict)
+        structure = defaultdict(lambda: defaultdict(list))  # {category: {sequence: [(frame_path, zip_file)]}}
 
+        # Process each category and its associated zips
         for category, zips in self.zip_mapping.items():
-            structure[category] = {}
             print(f"Processing category: {category}")
             
-            # Locate and parse set_lists across zips
-            combined_set_list = {}
+            # Iterate over each zip for the category
             for zip_file in zips:
                 with ZipFile(zip_file, 'r') as zf:
-                    # Check for relevant set_lists files
+                    # Locate relevant set_lists files for the subset
                     set_lists_files = [
                         f for f in zf.namelist() if f"set_lists/set_lists_{self.subset_name}.json" in f
                     ]
                     for set_lists_file in set_lists_files:
                         with zf.open(set_lists_file) as f:
                             set_list = json.load(f)
-                        # Combine set_lists data
-                        for sequence, frames in set_list.items():
-                            if sequence not in combined_set_list:
-                                combined_set_list[sequence] = []
-                            combined_set_list[sequence].extend(frames)
-
-            # Map frames to their corresponding zip files
-            for zip_file in zips:
-                with ZipFile(zip_file, 'r') as zf:
-                    for sequence, frames in combined_set_list.items():
-                        if sequence not in structure[category]:
-                            structure[category][sequence] = []
-                        for frame in frames:
-                            # Check if frame exists in the zip
-                            frame_path = f"{sequence}/{frame}"
-                            if frame_path in zf.namelist():
-                                structure[category][sequence].append((frame_path, zip_file))
+                        
+                        # Process frames in the 'train', 'val', or 'test' split
+                        if self.subset_name in set_list:
+                            for entry in set_list[self.subset_name]:  # Each entry: [sequence_name, frame_index, relative_frame_path]
+                                sequence_name, frame_index, relative_frame_path = entry
+                                if sequence_name not in structure[category]:
+                                    structure[category][sequence_name] = []
+                                
+                                # Verify frame existence in the zip
+                                if relative_frame_path in zf.namelist():
+                                    structure[category][sequence_name].append((relative_frame_path, zip_file))
         
         # Save the mapping for future use
         with open(mapping_path, "w") as f:
