@@ -86,9 +86,9 @@ class TimeTuningV2(torch.nn.Module):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
         dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
-        if self.model_type == "registers":
+        if self.model_type in[ "registers", "dinov2"]:
             # Separate patch tokens and register tokens
-            patch_tokens = dataset_features[:, :-8, :]  # Last 8 are registers
+            patch_tokens = dataset_features[:, :-4, :]  # Last 8 are registers
         else:
             patch_tokens = dataset_features
 
@@ -156,9 +156,9 @@ class TimeTuningV2(torch.nn.Module):
         self.feature_extractor.eval()
         with torch.no_grad():
             spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
-            if self.model_type == "registers":
+            if self.model_type in [ "registers", "dinov2"]:
                 # Exclude registers during validation
-                spatial_features = spatial_features[:, :-8, :]  # Last 8 are registers
+                spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
         return spatial_features
 
     def save(self, path):
@@ -433,7 +433,8 @@ def run(args):
     if args.model_type == 'dino':
         vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     elif args.model_type in ['dinov2','registers']:
-        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
+        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
     patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type)
     optimization_config = {
         'init_lr': 1e-4,
