@@ -615,28 +615,44 @@ class CO3DDataset(Dataset):
         for category, zips in self.zip_mapping.items():
             print(f"Processing category: {category}")
             
-            # Iterate over each zip for the category
+            # First, locate and process the set_lists files across all zips
+            combined_set_list = []
             for zip_file in zips:
                 with ZipFile(zip_file, 'r') as zf:
-                    # Locate relevant set_lists files for the subset
+                    # Locate set_list files for the subset
                     set_lists_files = [
                         f for f in zf.namelist() if f"set_lists/set_lists_{self.subset_name}.json" in f
                     ]
                     for set_lists_file in set_lists_files:
+                        print(f"Found set_list file: {set_lists_file} in zip: {zip_file}")
                         with zf.open(set_lists_file) as f:
                             set_list = json.load(f)
                         
-                        # Process frames in the 'train', 'val', or 'test' split
+                        # Append entries from the 'train' split
                         if 'train' in set_list:
-                            for entry in set_list['train']:  # Each entry: [sequence_name, frame_index, relative_frame_path]
-                                sequence_name, frame_index, relative_frame_path = entry
-                                if sequence_name not in structure[category]:
-                                    print(f"Not found sequence '{sequence_name}' in category '{structure[category]}'")
-                                    structure[category][sequence_name] = []
-                                print(f"Looking for frame in '{relative_frame_path}'")
-                                # Verify frame existence in the zip
-                                if relative_frame_path in zf.namelist():
-                                    structure[category][sequence_name].append((relative_frame_path, zip_file))
+                            combined_set_list.extend(set_list['train'])  # Each entry: [sequence_name, frame_index, relative_frame_path]
+            
+            # Now, locate the frames across all zips
+            for entry in combined_set_list:
+                sequence_name, frame_index, relative_frame_path = entry
+                if sequence_name not in structure[category]:
+                    structure[category][sequence_name] = []
+
+                # Normalize frame path
+                normalized_frame_path = "/".join(relative_frame_path.split("/")[1:])  # Remove category prefix
+                found = False
+
+                # Search for the frame in all zips of the category
+                for zip_file in zips:
+                    with ZipFile(zip_file, 'r') as zf:
+                        if normalized_frame_path in zf.namelist():
+                            structure[category][sequence_name].append((relative_frame_path, zip_file))
+                            found = True
+                            print(f"Frame '{normalized_frame_path}' found in zip '{zip_file}'")
+                            break  # No need to check other zips once found
+                
+                if not found:
+                    print(f"Frame '{normalized_frame_path}' NOT found in any zips for category '{category}'")
         
         # Save the mapping for future use
         with open(mapping_path, "w") as f:
@@ -644,6 +660,7 @@ class CO3DDataset(Dataset):
         print(f"Frame-to-zip mapping saved to {mapping_path}")
         
         return structure
+
 
 
     def stream_file(self, zip_path, file_path):
