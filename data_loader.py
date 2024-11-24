@@ -695,6 +695,7 @@ class CO3DDataset(Dataset):
         Returns:
             tuple: (frames, category, sequence_name).
         """
+        print(f'index: {index}')
         # Find the category and sequence
         category = list(self.dataset_structure.keys())[index // len(self.dataset_structure)]
         sequences = self.dataset_structure[category]
