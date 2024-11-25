@@ -216,8 +216,8 @@ class FeatureExtractor(torch.nn.Module):
             #register_tokens = self.register_tokens.expand(bs, -1, -1)  # (batch_size, num_registers, d_model)
             #features = self.model.forward_features(imgs)["x_norm_patchtokens"]
             output = self.model.forward_features(imgs)
-            if "x_norm_registertokens" in output:
-                register_tokens = output["x_norm_registertokens"]   
+            if "x_norm_regtokens" in output:
+                register_tokens = output["x_norm_regtokens"]   
                 all_tokens = torch.cat((register_tokens, output["x_norm_patchtokens"]), dim=1)
                 print(f'Register tokens shape: {register_tokens.shape}')
                 return all_tokens, register_tokens
