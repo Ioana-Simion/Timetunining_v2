@@ -600,6 +600,7 @@ class CO3DDataset(Dataset):
         self.video_transform = video_transform
         self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
 
+
     def prepare_data(self, mapping_path):
         """Parse zips, locate set_lists, and save frame-to-zip mapping."""
         # Check if the mapping already exists
@@ -682,7 +683,7 @@ class CO3DDataset(Dataset):
         return Image.open(file_data)
 
     def __len__(self):
-        """Return the total number of sequences across all categories."""
+        """Return the total number of category-sequence pairs."""
         return sum(len(sequences) for sequences in self.dataset_structure.values())
 
     def __getitem__(self, index):
@@ -695,12 +696,17 @@ class CO3DDataset(Dataset):
         Returns:
             tuple: (frames, category, sequence_name).
         """
-        print(f'index: {index}')
-        # Find the category and sequence
-        category = list(self.dataset_structure.keys())[index // len(self.dataset_structure)]
-        sequences = self.dataset_structure[category]
-        sequence_name = list(sequences.keys())[index % len(sequences)]
-        frame_info = sequences[sequence_name][:self.num_frames]
+        print(f"Index: {index}")
+        # Flatten the dataset structure into a list of (category, sequence) pairs
+        flat_structure = [
+            (category, sequence_name) 
+            for category, sequences in self.dataset_structure.items() 
+            for sequence_name in sequences
+        ]
+
+        # Get the category and sequence corresponding to the index
+        category, sequence_name = flat_structure[index]
+        frame_info = self.dataset_structure[category][sequence_name][:self.num_frames]
 
         # Debug mapping retrieval
         print(f"Accessing category: {category}, sequence: {sequence_name}")
@@ -719,15 +725,11 @@ class CO3DDataset(Dataset):
         if not frame_images:
             raise ValueError(f"No frames could be loaded for sequence '{sequence_name}' in category '{category}'.")
 
-        # Ensure the clip is a list of frames
-        if not isinstance(frame_images, list) or not all(isinstance(img, Image.Image) for img in frame_images):
-            raise TypeError("Expected a list of PIL.Image frames, but got something else.")
-
         # Apply frame-level transformations
         if self.frame_transform:
             frame_images = self.frame_transform(frame_images)
 
-        # If video-level transformations are provided, apply to the whole clip
+        # Apply video-level transformations
         if self.video_transform:
             frame_images = self.video_transform(frame_images)
 
