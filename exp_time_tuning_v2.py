@@ -86,7 +86,7 @@ class TimeTuningV2(torch.nn.Module):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
         dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
-        if self.model_type in[ "registers", "dinov2"]:
+        if self.model_type == "registers":
             # Separate patch tokens and register tokens
             patch_tokens = dataset_features[:, :-4, :]  # Last 8 are registers
         else:
@@ -156,7 +156,7 @@ class TimeTuningV2(torch.nn.Module):
         self.feature_extractor.eval()
         with torch.no_grad():
             spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
-            if self.model_type in [ "registers", "dinov2"]:
+            if self.model_type ==  "registers":
                 # Exclude registers during validation
                 spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
         return spatial_features
