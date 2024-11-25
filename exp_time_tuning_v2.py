@@ -433,7 +433,8 @@ def run(args):
     if args.model_type == 'dino':
         vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     elif args.model_type in ['dinov2','registers']:
-        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
+        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
         print(vit_model)  # Print the entire architecture
         print(f'Vit model loaded: {vit_model}')
         print(f'DIR Vit model loaded: {dir(vit_model)}') 
