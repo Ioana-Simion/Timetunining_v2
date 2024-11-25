@@ -213,7 +213,7 @@ class FeatureExtractor(torch.nn.Module):
 
         if self.model_type == "registers":
             # Add register tokens
-            register_tokens = self.register_tokens.expand(bs, -1, -1)  # (batch_size, num_registers, d_model)
+            #register_tokens = self.register_tokens.expand(bs, -1, -1)  # (batch_size, num_registers, d_model)
             #features = self.model.forward_features(imgs)["x_norm_patchtokens"]
             output = self.model.forward_features(imgs)
             if "x_norm_registertokens" in output:
