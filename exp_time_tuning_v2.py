@@ -55,7 +55,8 @@ class TimeTuningV2(torch.nn.Module):
             eval_spatial_resolution=self.eval_spatial_resolution,
             d_model=384,
             model_type=model_type,
-            num_registers=4 if model_type == "registers" else 0,
+            #num_registers=4 if model_type == "registers" else 0,
+            num_registers=0,
         )
         self.FF = FeatureForwarder(self.eval_spatial_resolution, context_frames, context_window, topk=topk, feature_head=None)
         self.logger = logger
@@ -294,6 +295,7 @@ class TimeTuningV2Trainer():
                 targets.append(resized_target)
                 feature_group.append(spatial_features)
             eval_features = torch.cat(feature_group, dim=0)
+            print(f"eval_features shape before reshape: {eval_features.shape}")
             eval_targets = torch.cat(targets, dim=0)
             B, np, dim = eval_features.shape
             eval_features = eval_features.reshape(eval_features.shape[0], feature_spatial_resolution, feature_spatial_resolution, dim)
@@ -301,6 +303,7 @@ class TimeTuningV2Trainer():
             eval_features = F.interpolate(eval_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear")
             eval_features = eval_features.reshape(B, dim, -1).permute(0, 2, 1)
             eval_features = eval_features.detach().cpu().unsqueeze(1)
+            print(f"feature_spatial_resolution: {feature_spatial_resolution}, dim: {dim}")
             cluster_maps = clustering_method.cluster(eval_features)
             cluster_maps = cluster_maps.reshape(B, val_spatial_resolution, val_spatial_resolution).unsqueeze(1)
             valid_idx = eval_targets != 255

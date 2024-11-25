@@ -151,7 +151,7 @@ class FCNHead(BaseDecodeHead):
     
 
 class FeatureExtractor(torch.nn.Module):
-    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768, model_type="dino", num_registers=4):
+    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768, model_type="dino", num_registers=0):
         super().__init__()
         self.model = vit_model
         self.eval_spatial_resolution = eval_spatial_resolution
@@ -159,8 +159,8 @@ class FeatureExtractor(torch.nn.Module):
         self.model_type = model_type
         self.num_registers = num_registers
 
-        if model_type == "registers":
-            self.register_tokens = nn.Parameter(torch.randn(1, num_registers, d_model))
+        # if model_type == "registers":
+        #     self.register_tokens = nn.Parameter(torch.randn(1, num_registers, d_model))
 
 
     def freeze_feature_extractor(self, unfreeze_layers=[]):
