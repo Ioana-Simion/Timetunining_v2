@@ -156,9 +156,11 @@ class TimeTuningV2(torch.nn.Module):
     def validate_step(self, img):
         self.feature_extractor.eval()
         with torch.no_grad():
-            spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
+            spatial_features, reg = self.feature_extractor.forward_features(img)  # (B, np, dim)
             if self.model_type ==  "registers":
                 # Exclude registers during validation
+                print(f'spatial_features shape before: {spatial_features.shape}')
+                print(f'reg shape before: {reg.shape}')
                 spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
         return spatial_features
 
