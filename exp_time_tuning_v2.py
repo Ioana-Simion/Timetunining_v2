@@ -55,7 +55,7 @@ class TimeTuningV2(torch.nn.Module):
             eval_spatial_resolution=self.eval_spatial_resolution,
             d_model=384,
             model_type=model_type,
-            num_registers=8 if model_type == "registers" else 0,
+            num_registers=4 if model_type == "registers" else 0,
         )
         self.FF = FeatureForwarder(self.eval_spatial_resolution, context_frames, context_window, topk=topk, feature_head=None)
         self.logger = logger

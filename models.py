@@ -151,7 +151,7 @@ class FCNHead(BaseDecodeHead):
     
 
 class FeatureExtractor(torch.nn.Module):
-    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768, model_type="dino", num_registers=8):
+    def __init__(self, vit_model, eval_spatial_resolution=14, d_model=768, model_type="dino", num_registers=4):
         super().__init__()
         self.model = vit_model
         self.eval_spatial_resolution = eval_spatial_resolution
@@ -214,7 +214,9 @@ class FeatureExtractor(torch.nn.Module):
         if self.model_type == "registers":
             # Add register tokens
             register_tokens = self.register_tokens.expand(bs, -1, -1)  # (batch_size, num_registers, d_model)
-            features = self.model.forward_features(imgs)["x_norm_patchtokens"]
+            #features = self.model.forward_features(imgs)["x_norm_patchtokens"]
+            features = self.model.forward_features(imgs)
+            print(features.keys())
             features_with_registers = torch.cat((register_tokens, features), dim=1)
 
             return features_with_registers, register_tokens
