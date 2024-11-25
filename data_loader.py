@@ -569,7 +569,7 @@ class CO3DDataset(Dataset):
         frame_transform=None, 
         target_transform=None, 
         video_transform=None, 
-        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping2.json"
+        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping3.json"
     ):
         """
         CO3D Dataset loader.
@@ -1326,7 +1326,7 @@ class VideoDataModule():
         elif self.name == "co3d":
             print('using CO3D dataset')
             self.dataset = CO3DDataset(
-                subset_name='manyview_dev_0',
+                subset_name='manyview_dev_1',
                 sampling_mode=self.sampling_mode,
                 num_clips=self.num_clips,
                 num_frames=self.num_clip_frames,
