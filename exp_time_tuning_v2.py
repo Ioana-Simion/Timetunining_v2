@@ -433,12 +433,15 @@ def run(args):
     if args.model_type == 'dino':
         vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     elif args.model_type in ['dinov2','registers']:
-        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
-        print(vit_model)  # Print the entire architecture
-        print(f'Vit model loaded: {vit_model}')
-        print(f'DIR Vit model loaded: {dir(vit_model)}') 
         #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
+        vit_model = vit_model.backbone
+        print(hasattr(vit_model, 'forward_features'))
+        # print(f'Vit model loaded: {vit_model}')
+        # print(f'DIR Vit model loaded: {dir(vit_model)}') 
+        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+    elif args.model_type == 'registers':
+        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
     patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type)
     optimization_config = {
         'init_lr': 1e-4,
