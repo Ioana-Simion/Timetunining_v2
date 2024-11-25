@@ -215,11 +215,14 @@ class FeatureExtractor(torch.nn.Module):
             # Add register tokens
             register_tokens = self.register_tokens.expand(bs, -1, -1)  # (batch_size, num_registers, d_model)
             #features = self.model.forward_features(imgs)["x_norm_patchtokens"]
-            features = self.model.forward_features(imgs)
-            print(features.keys())
-            features_with_registers = torch.cat((register_tokens, features), dim=1)
-
-            return features_with_registers, register_tokens
+            output = self.model.forward_features(imgs)
+            if "x_norm_registertokens" in output:
+                register_tokens = output["x_norm_registertokens"]   
+                all_tokens = torch.cat((register_tokens, output["x_norm_patchtokens"]), dim=1)
+                print(f'Register tokens shape: {register_tokens.shape}')
+                return all_tokens, register_tokens
+            else:
+                return output["x_norm_patchtokens"], None
         elif self.model_type == "dino":
             try:
                 ## for the backbones that does not support the function
