@@ -43,7 +43,7 @@ torch.cuda.manual_seed(1)
 
 
 class TimeTuningV2(torch.nn.Module):
-    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino'):
+    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino', training_set = 'ytvos'):
         super(TimeTuningV2, self).__init__()
         self.input_size = input_size
         if model_type == 'dino':
@@ -76,6 +76,7 @@ class TimeTuningV2(torch.nn.Module):
         prototype_init = F.normalize(prototype_init, dim=-1, p=2)
         self.prototypes = torch.nn.Parameter(prototype_init)
         self.model_type = model_type
+        self.train_set = training_set
 
     def normalize_prototypes(self):
         with torch.no_grad():
@@ -323,9 +324,13 @@ class TimeTuningV2Trainer():
             if jac > self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
+            # save latest model checkpoint nonetheless
+            # should always overwrite
+            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}.pth")
+            self.time_tuning_model.save(save_path_latest)
     
 
     def validate1(self, epoch, val_spatial_resolution=56):
@@ -448,7 +453,7 @@ def run(args):
         vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
         vit_model = vit_model.backbone
         print(hasattr(vit_model, 'forward_features'))
-    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type)
+    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type, training_set = args.training_set)
     optimization_config = {
         'init_lr': 1e-4,
         'peak_lr': 1e-3,
