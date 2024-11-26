@@ -76,7 +76,7 @@ class TimeTuningV2(torch.nn.Module):
         prototype_init = F.normalize(prototype_init, dim=-1, p=2)
         self.prototypes = torch.nn.Parameter(prototype_init)
         self.model_type = model_type
-        self.train_set = training_set
+        self.training_set = training_set
 
     def normalize_prototypes(self):
         with torch.no_grad():
