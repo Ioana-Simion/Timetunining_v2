@@ -255,7 +255,8 @@ class TimeTuningV2Trainer():
             # if epoch % 1 == 0:
             #     self.validate(epoch)
             if self.spair_val:
-                if epoch % 2 == 0: # 2 only for debuggingt then we do evey 10/20
+                if epoch % 20 == 0: # 2 only for debuggingt then we do evey 10/20
+                    self.validate(epoch)
                     eval_model = copy.deepcopy(self.time_tuning_model)
                     eval_model.eval()
                     self.time_tuning_model.eval()
