@@ -569,7 +569,7 @@ class CO3DDataset(Dataset):
         frame_transform=None, 
         target_transform=None, 
         video_transform=None, 
-        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping_final_palindrome.json"
+        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping_final.json"
     ):
         """
         CO3D Dataset loader.

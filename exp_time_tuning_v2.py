@@ -88,11 +88,7 @@ class TimeTuningV2(torch.nn.Module):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
         dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
-        if self.model_type == "registers":
-            # Separate patch tokens and register tokens
-            patch_tokens = dataset_features[:, :-4, :]  # Last 8 are registers
-        else:
-            patch_tokens = dataset_features
+        patch_tokens = dataset_features
 
         _, np, dim = patch_tokens.shape
         target_scores_group = []
@@ -158,11 +154,11 @@ class TimeTuningV2(torch.nn.Module):
         self.feature_extractor.eval()
         with torch.no_grad():
             spatial_features, reg = self.feature_extractor.forward_features(img)  # (B, np, dim)
-            if self.model_type ==  "registers":
-                # Exclude registers during validation
-                print(f'spatial_features shape before: {spatial_features.shape}')
-                print(f'reg shape before: {reg.shape}')
-                spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
+            # if self.model_type ==  "registers":
+            #     # Exclude registers during validation
+            #     print(f'spatial_features shape before: {spatial_features.shape}')
+            #     print(f'reg shape before: {reg.shape}')
+            #     spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
         return spatial_features
 
     def save(self, path):
@@ -269,7 +265,7 @@ class TimeTuningV2Trainer():
                         checkpoint_dir = "checkpoints"
                         if not os.path.exists(checkpoint_dir):
                             os.makedirs(checkpoint_dir)
-                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_palindromes.pth")
+                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}.pth")
                         torch.save(self.time_tuning_model.state_dict(), save_path)
                         print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
                 else:
@@ -322,10 +318,10 @@ class TimeTuningV2Trainer():
                 os.makedirs(checkpoint_dir)
 
             #threshold = 0.143
-            if jac > self.best_miou:
+            if jac > 0.175: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_palindrome.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -334,7 +330,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_palindrome.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
