@@ -404,7 +404,7 @@ def run(args):
     num_clips = 1
     num_clip_frames = 4
     if args.training_set == 'co3d':
-        num_clip_frames = 5 # co3d has frames split over 5 so might make more sense
+        num_clip_frames = 4 # co3d has frames split over 5 so might make more sense
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
