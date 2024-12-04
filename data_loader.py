@@ -526,7 +526,7 @@ def locate_and_load_set_lists(root_directory, zip_mapping_path):
                 set_list_files = [f for f in z.namelist() if "set_lists/set_lists_manyview_dev_0.json" in f]
                 
                 if set_list_files:
-                    # Load the first match (assuming only one relevant file per zip)
+                    # Load the first match 
                     with z.open(set_list_files[0]) as f:
                         data = json.load(f)
 
@@ -633,17 +633,14 @@ class CO3DDataset(Dataset):
                         if 'train' in set_list:
                             combined_set_list.extend(set_list['train'])  # Each entry: [sequence_name, frame_index, relative_frame_path]
             
-            # Now, locate the frames across all zips
+            # Locate the frames across all zips
             for entry in combined_set_list:
                 sequence_name, frame_index, relative_frame_path = entry
                 if sequence_name not in structure[category]:
                     structure[category][sequence_name] = []
 
-                # Normalize frame path
-
                 print(f"relative_frame_path: {relative_frame_path}")
                 normalized_frame_path = relative_frame_path
-                #normalized_frame_path = "/".join(relative_frame_path.split("/")[1:])  # Remove category prefix
                 found = False
 
                 # Search for the frame in all zips of the category
@@ -708,7 +705,6 @@ class CO3DDataset(Dataset):
         category, sequence_name = flat_structure[index]
         frame_info = self.dataset_structure[category][sequence_name][:self.num_frames]
 
-        # Debug mapping retrieval
         print(f"Accessing category: {category}, sequence: {sequence_name}")
         print(f"Frame info: {frame_info}")
 
@@ -827,7 +823,7 @@ class CO3DDataset2(Dataset):
             # Retrieve the correct zip file path associated with this img_path
             zip_file_path = None
             for zip_file in self.category_data[category]:
-                if img_path in self.category_data[category][zip_file]:  # Adjust lookup if necessary
+                if img_path in self.category_data[category][zip_file]:  # Adjust lookup
                     zip_file_path = zip_file
                     break
 
