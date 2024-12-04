@@ -7,9 +7,9 @@ import torch
 # from pytorchvideo.data import Ucf101, make_clip_sampler
 import torch.nn.functional as F
 from clustering import PerDatasetClustering
-from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule
+from data_loader import PascalVOCDataModule, SamplingMode, VideoDataModule, SPairDataset, CLASS_IDS
 from eval_metrics import PredsmIoU
-from evaluator import LinearFinetuneModule
+from evaluator import LinearFinetuneModule, KeypointMatchingModule
 from models import FeatureExtractor, FeatureForwarder
 from my_utils import find_optimal_assignment, denormalize_video
 import wandb
@@ -21,6 +21,7 @@ from image_transformations import Compose, Resize
 import video_transformations
 import numpy as np
 import random
+import copy
 
 
 project_name = "TimeTuning_v2"
@@ -42,14 +43,21 @@ torch.cuda.manual_seed(1)
 
 
 class TimeTuningV2(torch.nn.Module):
-    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino'):
+    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino', training_set = 'ytvos'):
         super(TimeTuningV2, self).__init__()
         self.input_size = input_size
         if model_type == 'dino':
             self.eval_spatial_resolution = input_size // 16
-        elif model_type == 'dinov2':
+        elif model_type in ['dinov2', 'registers']:
             self.eval_spatial_resolution = input_size // 14
-        self.feature_extractor = FeatureExtractor(vit_model, eval_spatial_resolution=self.eval_spatial_resolution, d_model=384, model_type=model_type)
+        self.feature_extractor = FeatureExtractor(
+            vit_model,
+            eval_spatial_resolution=self.eval_spatial_resolution,
+            d_model=384,
+            model_type=model_type,
+            #num_registers=4 if model_type == "registers" else 0,
+            num_registers=0,
+        )
         self.FF = FeatureForwarder(self.eval_spatial_resolution, context_frames, context_window, topk=topk, feature_head=None)
         self.logger = logger
         self.num_prototypes = num_prototypes
@@ -63,67 +71,62 @@ class TimeTuningV2(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(512, 256),
         )
-        # self.lc = torch.nn.Linear(self.feature_extractor.d_model, self.eval_spatial_resolution ** 2)
         self.feature_extractor.freeze_feature_extractor(["blocks.11", "blocks.10"])
         prototype_init = torch.randn((num_prototypes, 256))
-        prototype_init =  F.normalize(prototype_init, dim=-1, p=2)  
+        prototype_init = F.normalize(prototype_init, dim=-1, p=2)
         self.prototypes = torch.nn.Parameter(prototype_init)
-    
+        self.model_type = model_type
+        self.training_set = training_set
 
     def normalize_prototypes(self):
         with torch.no_grad():
             w = self.prototypes.data.clone()
             w = F.normalize(w, dim=1, p=2)
             self.prototypes.copy_(w)
-            
-
-
 
     def train_step(self, datum):
         self.normalize_prototypes()
         bs, nf, c, h, w = datum.shape
-        denormalized_video = denormalize_video(datum)
-        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))
-        _, np, dim = dataset_features.shape
+        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
+        patch_tokens = dataset_features
+
+        _, np, dim = patch_tokens.shape
         target_scores_group = []
         q_group = []
 
-        projected_dataset_features = self.mlp_head(dataset_features)
-        projected_dim = projected_dataset_features.shape[-1]
-        projected_dataset_features = projected_dataset_features.reshape(-1, projected_dim)
-        normalized_projected_features = F.normalize(projected_dataset_features, dim=-1, p=2)
+        projected_patch_features = self.mlp_head(patch_tokens)
+        projected_dim = projected_patch_features.shape[-1]
+        projected_patch_features = projected_patch_features.reshape(-1, projected_dim)
+        normalized_projected_features = F.normalize(projected_patch_features, dim=-1, p=2)
 
-        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features , self.prototypes)
+        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features, self.prototypes)
         dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
         dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
         dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
         dataset_first_frame_q = dataset_q[:, 0, :, :]
-        dataset_first_frame_scores = dataset_scores[:, 0, :, :]
         dataset_target_frame_scores = dataset_scores[:, -1, :, :]
-        dataset_first_frame_q = dataset_first_frame_q.reshape(bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(0, 3, 1, 2).float()
-        dataset_features = dataset_features.reshape(bs, nf, np, dim)
-        loss = 0
-        for i, clip_features in enumerate(dataset_features):
+        dataset_first_frame_q = dataset_first_frame_q.reshape(
+            bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+        ).permute(0, 3, 1, 2).float()
+
+        patch_tokens = patch_tokens.reshape(bs, nf, np, dim)
+        for i, clip_features in enumerate(patch_tokens):
             q = dataset_first_frame_q[i]
             target_frame_scores = dataset_target_frame_scores[i]
             prediction = self.FF.forward(clip_features, q)
             prediction = torch.stack(prediction, dim=0)
             propagated_q = prediction[-1]
-            target_frame_scores = target_frame_scores.reshape(self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes).permute(2, 0, 1).float()
+            target_frame_scores = target_frame_scores.reshape(
+                self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+            ).permute(2, 0, 1).float()
             target_scores_group.append(target_frame_scores)
             q_group.append(propagated_q)
-            ## visualize the clustering
-            # cluster_map = torch.cat([q.unsqueeze(0), prediction], dim=0)
-            # cluster_map = cluster_map.argmax(dim=1)
-            # resized_cluster_map = F.interpolate(cluster_map.float().unsqueeze(0), size=(h, w), mode="nearest").squeeze(0)
-            # _, overlayed_images = overlay_video_cmap(resized_cluster_map, denormalized_video[i])
-            # convert_list_to_video(overlayed_images.detach().cpu().permute(0, 2, 3, 1).numpy(), f"Temp/overlayed_{i}.mp4", speed=1000/ nf)
-        
+
         target_scores = torch.stack(target_scores_group, dim=0)
         propagated_q_group = torch.stack(q_group, dim=0)
         propagated_q_group = propagated_q_group.argmax(dim=1)
-        clustering_loss = self.criterion(target_scores  / 0.1, propagated_q_group.long())
-        
+        clustering_loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
+
         return clustering_loss
     
 
@@ -147,22 +150,24 @@ class TimeTuningV2(torch.nn.Module):
         all_params = feature_extractor_params + mlp_head_params + prototypes_params
         return all_params
 
-
-
     def validate_step(self, img):
         self.feature_extractor.eval()
         with torch.no_grad():
-            spatial_features, _ = self.feature_extractor.forward_features(img)  # (B, np, dim)
+            spatial_features, reg = self.feature_extractor.forward_features(img)  # (B, np, dim)
+            # if self.model_type ==  "registers":
+            #     # Exclude registers during validation
+            #     print(f'spatial_features shape before: {spatial_features.shape}')
+            #     print(f'reg shape before: {reg.shape}')
+            #     spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
         return spatial_features
 
     def save(self, path):
         torch.save(self.state_dict(), path)
 
-
         
 
 class TimeTuningV2Trainer():
-    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger):
+    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_dataset, spair_val=False):
         self.dataloader = data_module.data_loader
         self.test_dataloader = test_dataloader
         self.time_tuning_model = time_tuning_model
@@ -172,7 +177,28 @@ class TimeTuningV2Trainer():
         self.num_epochs = num_epochs
         self.logger = logger
         self.logger.watch(time_tuning_model, log="all", log_freq=10)
-    
+        self.best_miou = 0
+        self.best_recall = 0
+        self.spair_val = spair_val
+        if self.spair_val:
+            # print(f'spair_data_path: {spair_data_path}')
+            # spair_dataset = SPairDataset(
+            #         root=spair_data_path,
+            #         split="test",
+            #         use_bbox=False,
+            #         image_size=224,
+            #         image_mean="imagenet",
+            #         class_name=list(CLASS_IDS.keys()),
+            #         num_instances=100,
+            #         vp_diff=None,
+            # )
+            # print(f'Length of SPair Dataset: {len(spair_dataset)}')
+            self.spair_dataset = spair_dataset
+            #eval_model = copy.deepcopy(self.time_tuning_model)
+            #eval_model.eval()
+
+            #self.keypoint_matching_module = KeypointMatchingModule(eval_model, spair_dataset, device)
+
     
     def setup_optimizer(self, optimization_config):
         model_params = self.time_tuning_model.get_optimization_params()
@@ -222,7 +248,29 @@ class TimeTuningV2Trainer():
     def train(self):
         for epoch in range(self.num_epochs):
             print("Epoch: {}".format(epoch))
-            if epoch % 1 == 0:
+            # if epoch % 1 == 0:
+            #     self.validate(epoch)
+            if self.spair_val:
+                if epoch % 20 == 0: # 2 only for debuggingt then we do evey 10/20
+                    self.validate(epoch)
+                    eval_model = copy.deepcopy(self.time_tuning_model)
+                    eval_model.eval()
+                    self.time_tuning_model.eval()
+                    self.keypoint_matching_module = KeypointMatchingModule(eval_model, self.spair_dataset, self.device)
+                    recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
+                    self.logger.log({"keypoint_matching_recall": recall})
+                    print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
+                    if recall > self.best_recall:
+                        self.best_recall = recall
+                        checkpoint_dir = "checkpoints"
+                        if not os.path.exists(checkpoint_dir):
+                            os.makedirs(checkpoint_dir)
+                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+                        torch.save(self.time_tuning_model.state_dict(), save_path)
+                        print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
+                else:
+                    self.validate(epoch)
+            else:
                 self.validate(epoch)
             self.train_one_epoch()
             # self.validate(epoch)
@@ -247,6 +295,7 @@ class TimeTuningV2Trainer():
                 targets.append(resized_target)
                 feature_group.append(spatial_features)
             eval_features = torch.cat(feature_group, dim=0)
+            print(f"eval_features shape before reshape: {eval_features.shape}")
             eval_targets = torch.cat(targets, dim=0)
             B, np, dim = eval_features.shape
             eval_features = eval_features.reshape(eval_features.shape[0], feature_spatial_resolution, feature_spatial_resolution, dim)
@@ -254,6 +303,7 @@ class TimeTuningV2Trainer():
             eval_features = F.interpolate(eval_features, size=(val_spatial_resolution, val_spatial_resolution), mode="bilinear")
             eval_features = eval_features.reshape(B, dim, -1).permute(0, 2, 1)
             eval_features = eval_features.detach().cpu().unsqueeze(1)
+            print(f"feature_spatial_resolution: {feature_spatial_resolution}, dim: {dim}")
             cluster_maps = clustering_method.cluster(eval_features)
             cluster_maps = cluster_maps.reshape(B, val_spatial_resolution, val_spatial_resolution).unsqueeze(1)
             valid_idx = eval_targets != 255
@@ -263,6 +313,25 @@ class TimeTuningV2Trainer():
             jac, tp, fp, fn, reordered_preds, matched_bg_clusters = metric.compute(is_global_zero=True)
             self.logger.log({"val_k=gt_miou": jac})
             # print(f"Epoch : {epoch}, eval finished, miou: {jac}")
+            checkpoint_dir = "checkpoints"
+            if not os.path.exists(checkpoint_dir):
+                os.makedirs(checkpoint_dir)
+
+            #threshold = 0.143
+            if jac > 0.175: #self.best_miou:
+                self.best_miou = jac
+                #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+                self.time_tuning_model.save(save_path)
+                print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
+            # elif jac > 0.165:
+            #     save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_justloaded.pth")
+            #     self.time_tuning_model.save(save_path)
+            #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
+            # save latest model checkpoint nonetheless
+            # should always overwrite
+            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+            self.time_tuning_model.save(save_path_latest)
     
 
     def validate1(self, epoch, val_spatial_resolution=56):
@@ -334,27 +403,60 @@ def run(args):
     video_transform = video_transformations.Compose(video_transform_list)
     num_clips = 1
     num_clip_frames = 4
+    if args.training_set == 'co3d':
+        num_clip_frames = 4 # co3d has frames split over 5 so might make more sense
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
-    prefix = "/scratch-shared/isimion1/timet"
-    data_path = os.path.join(prefix, "train/JPEGImages")
-    annotation_path = os.path.join(prefix, "train/Annotations")
-    meta_file_path = os.path.join(prefix, "train/meta.json")
+    prefix = args.prefix_path
+    if args.training_set == 'ytvos':
+        data_path = os.path.join(prefix, "train/JPEGImages")
+        annotation_path = os.path.join(prefix, "train/Annotations")
+        meta_file_path = os.path.join(prefix, "train/meta.json")
+    elif args.training_set == 'co3d':
+        data_path = os.path.join(prefix, "zips")
+        annotation_path = os.path.join(prefix, "zips")
+        meta_file_path = os.path.join(prefix, "zips")
     print(data_path)
     print(annotation_path)
     print(meta_file_path)
     path_dict = {"class_directory": data_path, "annotation_directory": annotation_path, "meta_file_path": meta_file_path}
     sampling_mode = SamplingMode.DENSE
-    video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    if args.training_set == 'ytvos':
+        video_data_module = VideoDataModule("ytvos", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
+    elif args.training_set == 'co3d':
+        video_data_module = VideoDataModule("co3d", path_dict, num_clips, num_clip_frames, sampling_mode, regular_step, batch_size, num_workers)
     video_data_module.setup(transformations_dict)
     video_data_module.make_data_loader()
-
+    spair_dataset = None
+    if args.spair_val:
+        print(f'spair_data_path: {args.spair_path}')
+        vp_diff = None
+        spair_dataset = SPairDataset(
+            root=args.spair_path,
+            split="test",
+            use_bbox=False,
+            image_size=224,
+            image_mean="imagenet",
+            class_name= None, # loop over classes in val if we want a per class recall
+            num_instances=100,
+            vp_diff=vp_diff,
+        )
+        print(f'Length of SPair Dataset: {len(spair_dataset)}')
     if args.model_type == 'dino':
         vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     elif args.model_type == 'dinov2':
         vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type)
+        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
+        #vit_model = vit_model.backbone
+        # print(f'Vit model loaded: {vit_model}')
+        # print(f'DIR Vit model loaded: {dir(vit_model)}') 
+        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+    elif args.model_type == 'registers':
+        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
+        vit_model = vit_model.backbone
+        print(hasattr(vit_model, 'forward_features'))
+    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type, training_set = args.training_set)
     optimization_config = {
         'init_lr': 1e-4,
         'peak_lr': 1e-3,
@@ -369,10 +471,10 @@ def run(args):
         Resize(size=(input_size, input_size)),
     ])
     val_transforms = {"img": image_val_transform, "target": None , "shared": shared_val_transform}
-    dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, num_workers=num_workers)
+    dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger)
+    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val)
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 
@@ -385,15 +487,21 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', type=str, default="cuda:3")
+    #parser.add_argument('--prefix_path', type=str, default="/scratch-shared/isimion1/timet")
+    parser.add_argument('--prefix_path', type=str, default="/projects/2/managed_datasets/co3d/")
+    parser.add_argument('--pascal_path', type=str, default="/scratch-shared/isimion1/pascal/VOCSegmentation")
+    parser.add_argument('--spair_path', type=str, default="/home/isimion1/probe3d/data/SPair-71k")
     parser.add_argument('--ucf101_path', type=str, default="/scratch-shared/isimion1/timet/train")
     parser.add_argument('--clip_durations', type=int, default=2)
+    parser.add_argument('--training_set', type=str, choices=['ytvos', 'co3d'], default='ytvos')
+    parser.add_argument('--spair_val', type=float, default=False)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_workers', type=int, default=12)
     parser.add_argument('--input_size', type=int, default=224)
     parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)
     parser.add_argument('--crop_scale_tupple', type=tuple, default=(0.3, 1))
-    parser.add_argument('--model_type', type=str, choices=['dino', 'dinov2'], default='dinov2', help='Select model type: dino or dinov2')
+    parser.add_argument('--model_type', type=str, choices=['dino', 'dinov2', 'registers'], default='dinov2', help='Select model type: dino or dinov2')
     parser.add_argument('--masking_ratio', type=float, default=1)
     parser.add_argument('--same_frame_query_ref', type=bool, default=False)
     parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")

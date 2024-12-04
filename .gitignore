@@ -1,3 +1,5 @@
 wandb/
 __pycache__/
 job_logs/
+checkpoints/
+

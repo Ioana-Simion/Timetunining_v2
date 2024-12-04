@@ -33,6 +33,11 @@ from torchvision.datasets import CIFAR10
 from pycocotools.coco import COCO
 from typing import Any, Callable, List, Optional, Tuple
 
+from zipfile import ZipFile
+
+import gzip
+from collections import defaultdict
+import io
 
 project_name = "TimeTuning_v2"
 
@@ -47,6 +52,7 @@ random.seed(1)
 np.random.seed(1)
 torch.manual_seed(1)
 torch.cuda.manual_seed(1)
+from torchvision import transforms
 
 
 
@@ -468,7 +474,613 @@ class VideoDataset(torch.utils.data.Dataset):
         return data, annotations
 
 
+def save_mapping(mapping, filepath="zip_mapping.json"):
+    with open(filepath, "w") as f:
+        json.dump(mapping, f)
 
+def load_mapping(filepath="zip_mapping.json"):
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            return json.load(f)
+    return None
+
+from collections import defaultdict
+
+def generate_zip_mapping(root_directory, zip_mapping_path):
+    """Generates the zip_mapping.json by organizing zip files by category and saving the mapping."""
+    category_zip_map = defaultdict(list)
+    # Scan for zip files in the root directory and organize by category
+    for zip_path in glob.glob(os.path.join(root_directory, "*.zip")):
+        category = os.path.basename(zip_path).split("_")[0]
+        category_zip_map[category].append(zip_path)
+    
+    # Save the mapping to a JSON file
+    with open(zip_mapping_path, 'w') as f:
+        json.dump(category_zip_map, f, indent=4)
+    print(f"Zip mapping saved at {zip_mapping_path}")
+
+def locate_and_load_set_lists(root_directory, zip_mapping_path):
+
+    if os.path.isfile(zip_mapping_path):
+        with open(zip_mapping_path, 'r') as f:
+            zip_mapping = json.load(f)
+        print(f"Loaded zip mapping from {zip_mapping_path}")
+    else:
+        print("zip_mapping.json not found. Creating a new mapping...")
+        generate_zip_mapping(root_directory, zip_mapping_path)
+        
+        # Load the newly created mapping
+        with open(zip_mapping_path, 'r') as f:
+            zip_mapping = json.load(f)
+
+
+    category_data = defaultdict(dict)
+
+    for category, zip_files in zip_mapping.items():
+        print(f"Processing category '{category}' with {len(zip_files)} zip files")
+        
+        # Search for 'set_lists' files within each zip for the category
+        for zip_file in zip_files:
+            with ZipFile(zip_file, 'r') as z:
+                # Check for the presence of "set_lists/set_lists_manyview_train.json"
+                set_list_files = [f for f in z.namelist() if "set_lists/set_lists_manyview_dev_0.json" in f]
+                
+                if set_list_files:
+                    # Load the first match 
+                    with z.open(set_list_files[0]) as f:
+                        data = json.load(f)
+
+                        if "train" in data:
+                            print(f"Found 'train_known' entries in {set_list_files[0]} for category '{category}'")
+                            
+                            # Store each entry in category_data for easier access
+                            for entry in data["train"]:
+                                sequence, frame_idx, img_path = entry
+                                
+                                # Initialize sequence if it doesn't exist
+                                if sequence not in category_data[category]:
+                                    category_data[category][sequence] = []
+                                    
+                                # Append frame information (index and path)
+                                category_data[category][sequence].append((frame_idx, img_path))
+        
+        # Ensure frames in each sequence are sorted by frame index
+        for sequence in category_data[category]:
+            category_data[category][sequence].sort()  # Sort by frame_idx
+            print(f"Sorted frames for category '{category}', sequence '{sequence}': {category_data[category][sequence]}")
+    
+    # Save the structured mapping to avoid recomputation
+    detailed_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+    #detailed_mapping_path = os.path.join(root_directory, "detailed_mapping.json")
+    with open(detailed_mapping_path, 'w') as f:
+        json.dump(category_data, f)
+
+    print("Finished creating detailed mapping.")
+    return category_data
+
+
+class CO3DDataset(Dataset):
+    def __init__(
+        self, 
+        subset_name, 
+        sampling_mode, 
+        num_clips, 
+        num_frames, 
+        frame_transform=None, 
+        target_transform=None, 
+        video_transform=None, 
+        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping_final.json"
+    ):
+        """
+        CO3D Dataset loader.
+
+        Args:
+            zip_mapping (dict): Mapping of categories to zip files.
+            subset_name (str): Subset name (e.g., "manyview_dev_0").
+            sampling_mode (str): Sampling mode (e.g., "dense").
+            num_clips (int): Number of clips per sequence.
+            num_frames (int): Number of frames per clip.
+            frame_transform (callable): Transform to apply to each frame.
+            target_transform (callable): Transform to apply to targets.
+            video_transform (callable): Transform to apply to video sequences.
+            mapping_path (str): Path to save/load the frame-to-zip mapping.
+        """
+        super().__init__()
+
+        if not os.path.exists('/home/isimion1/timet/Timetuning_v2/zip_mapping.json'):
+            raise FileNotFoundError(f"zip_mapping.json not found at {'/home/isimion1/timet/Timetuning_v2/zip_mapping.json'}")
+        with open('/home/isimion1/timet/Timetuning_v2/zip_mapping.json', "r") as f:
+            self.zip_mapping = json.load(f)
+        self.subset_name = subset_name
+        self.sampling_mode = sampling_mode
+        self.num_clips = num_clips
+        self.num_frames = num_frames
+        self.frame_transform = frame_transform
+        self.target_transform = target_transform
+        self.video_transform = video_transform
+        self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
+
+
+    def prepare_data(self, mapping_path):
+        """Parse zips, locate set_lists, and save frame-to-zip mapping."""
+        # Check if the mapping already exists
+        if os.path.exists(mapping_path):
+            print(f"Loading frame-to-zip mapping from {mapping_path}")
+            with open(mapping_path, "r") as f:
+                return json.load(f)
+        
+        print("Creating frame-to-zip mapping...")
+        structure = defaultdict(lambda: defaultdict(list))  # {category: {sequence: [(frame_path, zip_file)]}}
+
+        # Process each category and its associated zips
+        for category, zips in self.zip_mapping.items():
+            print(f"Processing category: {category}")
+            
+            # First, locate and process the set_lists files across all zips
+            combined_set_list = []
+            for zip_file in zips:
+                with ZipFile(zip_file, 'r') as zf:
+                    # Locate set_list files for the subset
+                    set_lists_files = [
+                        f for f in zf.namelist() if f"set_lists/set_lists_{self.subset_name}.json" in f
+                    ]
+                    for set_lists_file in set_lists_files:
+                        print(f"Found set_list file: {set_lists_file} in zip: {zip_file}")
+                        with zf.open(set_lists_file) as f:
+                            set_list = json.load(f)
+                        
+                        # Append entries from the 'train' split
+                        if 'train' in set_list:
+                            combined_set_list.extend(set_list['train'])  # Each entry: [sequence_name, frame_index, relative_frame_path]
+            
+            # Locate the frames across all zips
+            for entry in combined_set_list:
+                sequence_name, frame_index, relative_frame_path = entry
+                if sequence_name not in structure[category]:
+                    structure[category][sequence_name] = []
+
+                print(f"relative_frame_path: {relative_frame_path}")
+                normalized_frame_path = relative_frame_path
+                found = False
+
+                # Search for the frame in all zips of the category
+                for zip_file in zips:
+                    print(f"Searching for frame '{normalized_frame_path}' in zip '{zip_file}'")
+                    with ZipFile(zip_file, 'r') as zf:
+                        #print(f'namelist in zips {zf.namelist()}')
+                        if normalized_frame_path in zf.namelist():
+                            #print(f'namelist in zips {zf.namelist()}')
+                            structure[category][sequence_name].append((relative_frame_path, zip_file))
+                            found = True
+                            print(f"Frame '{normalized_frame_path}' found in zip '{zip_file}'")
+                            break  # No need to check other zips once found
+                
+                if not found:
+                    print(f"Frame '{normalized_frame_path}' NOT found in any zips for category '{category}'")
+                    raise ValueError("Frame not found in any zips")
+        
+        # Save the mapping for future use
+        with open(mapping_path, "w") as f:
+            json.dump(structure, f, indent=4)
+        print(f"Frame-to-zip mapping saved to {mapping_path}")
+        
+        return structure
+
+
+
+    def stream_file(self, zip_path, file_path):
+        """Stream a file from a zip."""
+        with ZipFile(zip_path, 'r') as zf:
+            with zf.open(file_path) as f:
+                return io.BytesIO(f.read())
+
+    def load_image(self, zip_path, file_path):
+        """Load an image directly from a zip."""
+        file_data = self.stream_file(zip_path, file_path)
+        return Image.open(file_data)
+
+    def __len__(self):
+        """Return the total number of category-sequence pairs."""
+        return sum(len(sequences) for sequences in self.dataset_structure.values())
+
+    def __getitem__(self, index):
+        """
+        Get a sample from the dataset.
+
+        Args:
+            index (int): Index of the sample.
+
+        Returns:
+            tuple: (frames, category, sequence_name).
+        """
+        print(f"Index: {index}")
+        # Flatten the dataset structure into a list of (category, sequence) pairs
+        flat_structure = [
+            (category, sequence_name) 
+            for category, sequences in self.dataset_structure.items() 
+            for sequence_name in sequences
+        ]
+
+        # Get the category and sequence corresponding to the index
+        category, sequence_name = flat_structure[index]
+        frame_info = self.dataset_structure[category][sequence_name][:self.num_frames]
+
+        print(f"Accessing category: {category}, sequence: {sequence_name}")
+        print(f"Frame info: {frame_info}")
+
+        # Load frames from their respective zips
+        frame_images = []
+        for frame_path, zip_path in frame_info:
+            try:
+                img = self.load_image(zip_path, frame_path)  # Load the image as PIL.Image
+                frame_images.append(img)
+            except FileNotFoundError as e:
+                print(f"Frame '{frame_path}' not found in '{zip_path}'. Skipping...")
+                continue
+
+        if not frame_images:
+            raise ValueError(f"No frames could be loaded for sequence '{sequence_name}' in category '{category}'.")
+
+        # Apply frame-level transformations
+        if self.frame_transform:
+            frame_images = self.frame_transform(frame_images)
+
+        # Apply video-level transformations
+        if self.video_transform:
+            frame_images = self.video_transform(frame_images)
+
+        # Convert the list of images into a tensor
+        frame_images = torch.stack(
+            [transforms.ToTensor()(img) if isinstance(img, Image.Image) else img for img in frame_images]
+        )
+        empty_annotation = torch.empty(0)
+        return frame_images, empty_annotation
+
+
+
+
+class CO3DDataset2(Dataset):
+    def __init__(self, root_directory, subset_name, sampling_mode, num_clips, num_frames,
+                 frame_transform=None, target_transform=None, video_transform=None, regular_step=1):
+        super().__init__()
+        self.root_directory = root_directory
+        self.subset_name = subset_name
+        self.sampling_mode = sampling_mode
+        self.num_clips = num_clips
+        self.num_frames = num_frames
+        self.frame_transform = frame_transform
+        self.target_transform = target_transform
+        self.video_transform = video_transform
+        self.regular_step = regular_step
+
+        # Load or create detailed mapping
+        zip_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/zip_mapping.json")
+        detailed_mapping_path = os.path.join("/home/isimion1/timet/Timetuning_v2/detailed_mapping.json")
+        self.category_data = self.load_mapping(detailed_mapping_path)
+        if self.category_data is None:
+            self.category_data = locate_and_load_set_lists(root_directory, zip_mapping_path)
+            with open(detailed_mapping_path, 'w') as f:
+                json.dump(self.category_data, f)
+
+        # Flatten the mapping to create sequences list
+        self.sequences = [
+            {"category": category, "sequence": sequence, "frames": frames}
+            for category, seq_data in self.category_data.items()
+            for sequence, frames in seq_data.items()
+        ]
+        print("Number of sequences:", len(self.sequences))
+
+    @staticmethod
+    def load_mapping(mapping_path):
+        """Load the mapping if it exists."""
+        if os.path.isfile(mapping_path):
+            with open(mapping_path, 'r') as f:
+                return json.load(f)
+        return None
+
+    def __len__(self):
+        return len(self.sequences)
+
+    def generate_indices(self, size):
+        indices = []
+        for _ in range(self.num_clips):
+            if self.sampling_mode == SamplingMode.UNIFORM:
+                idx = random.sample(range(size), self.num_frames) if size >= self.num_frames else random.choices(range(size), k=self.num_frames)
+            elif self.sampling_mode == SamplingMode.DENSE:
+                base = random.randint(0, size - self.num_frames)
+                idx = list(range(base, base + self.num_frames))
+            elif self.sampling_mode == SamplingMode.Regular:
+                step = min(self.regular_step, size // self.num_frames) if size >= self.num_frames * self.regular_step else size // self.num_frames
+                idx = list(range(0, size, step))[:self.num_frames]
+            indices.append(idx)
+        return indices
+
+    def read_clips(self, clip_indices, image_paths):
+        clips = []
+        for indices in clip_indices:
+            images = []
+            for idx in indices:
+                img_path, zip_file = image_paths[idx]
+                with ZipFile(zip_file, 'r') as z:
+                    images.append(Image.open(z.open(img_path)).convert("RGB"))
+            clips.append(images)
+        return clips
+
+    def __getitem__(self, idx):
+        sequence_data = self.sequences[idx]
+        category = sequence_data["category"]
+        sequence = sequence_data["sequence"]
+        frames = sequence_data["frames"]
+
+        if len(frames) >= self.num_frames:
+            start = random.randint(0, len(frames) - self.num_frames)
+            selected_frames = frames[start:start + self.num_frames]
+        else:
+            selected_frames = random.choices(frames, k=self.num_frames)
+
+        images = []
+        for frame_idx, img_path in selected_frames:
+            # Retrieve the correct zip file path associated with this img_path
+            zip_file_path = None
+            for zip_file in self.category_data[category]:
+                if img_path in self.category_data[category][zip_file]:  # Adjust lookup
+                    zip_file_path = zip_file
+                    break
+
+            if zip_file_path is None:
+                print(f"Warning: No zip file found for {img_path}")
+                continue
+
+            try:
+                with ZipFile(zip_file_path, 'r') as z:
+                    img = Image.open(z.open(img_path)).convert("RGB")
+                    if self.frame_transform:
+                        img = self.frame_transform(img)
+                    images.append(img)
+            except KeyError:
+                print(f"Warning: {img_path} not found in {zip_file_path}")
+
+        if not images:
+            print(f"No images found for sequence {sequence} cathegory{category} at index {idx}")
+            return None
+
+        images_tensor = torch.stack([torch.from_numpy(np.array(img)).permute(2, 0, 1) for img in images])
+        return images_tensor
+
+
+CLASS_IDS = {
+    "aeroplane": 1,
+    "bicycle": 2,
+    "bird": 3,
+    "boat": 4,
+    "bottle": 5,
+    "bus": 6,
+    "car": 7,
+    "cat": 8,
+    "chair": 9,
+    "cow": 10,
+    "dog": 12,
+    "horse": 13,
+    "motorbike": 14,
+    "person": 15,
+    "pottedplant": 16,
+    "sheep": 17,
+    "train": 19,
+    "tvmonitor": 20,
+}
+
+
+class SPairDataset(torch.utils.data.Dataset):
+    r"""Inherits CorrespondenceDataset"""
+
+    def __init__(
+        self,
+        root,
+        split='test',
+        image_size=224,
+        image_mean="imagenet",
+        use_bbox=True,
+        class_name=None,
+        num_instances=None,
+        vp_diff=None,
+    ):
+        """
+        Constructs the SPair Dataset loader
+
+        Inputs:
+            root: Dataset root (where SPair is found; kinda odd TODO)
+            thresh: how the threshold is calculated [img, bbox]
+            split: dataset split to be used
+            task: task for this dataset
+        """
+        super().__init__()
+        assert split in ["train", "valid", "test"]
+        self.root = root
+        self.split = split
+        self.image_size = image_size
+        self.use_bbox = use_bbox
+
+        if image_mean == "clip":
+            mean = [0.48145466, 0.4578275, 0.40821073]
+            std = [0.26862954, 0.26130258, 0.27577711]
+        elif image_mean == "imagenet":
+            mean = [0.485, 0.456, 0.406]
+            std = [0.229, 0.224, 0.225]
+        else:
+            raise ValueError()
+
+        self.image_transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=transforms.InterpolationMode.BICUBIC,
+                    antialias=True,
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+
+        self.mask_transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=transforms.InterpolationMode.NEAREST,
+                    antialias=True,
+                ),
+                transforms.ToTensor(),
+            ]
+        )
+
+        instances = self.get_pair_annotations()
+        #print(f'instances: {instances}')
+
+        if class_name:
+            c_insts = [_a for _a in instances if _a["category"] == class_name]
+            instances = c_insts
+
+        if vp_diff is not None:
+            instances = [_a for _a in instances if _a["viewpoint_variation"] == vp_diff]
+
+        if num_instances:
+            random.seed(20)
+            random.shuffle(instances)
+            instances = instances[:num_instances]
+
+        self.instances = instances
+        self.image_annotations = self.get_image_annotations()
+
+    def process_keypoints(self, kp_dict, bbox, num_kps=None):
+        num_kps = len(kp_dict) if num_kps is None else num_kps
+        all_kps = [(kp_dict[str(i)], i) for i in range(num_kps) if kp_dict[str(i)]]
+        kps_xy = torch.tensor([_xy for _xy, _ in all_kps]).int()
+        kps_id = torch.tensor([_id for _, _id in all_kps]).long()
+
+        if bbox:
+            kps_xy[:, 0] -= bbox[0]
+            kps_xy[:, 1] -= bbox[1]
+
+        # generate full tensor
+        kps = torch.zeros(num_kps, 3).int()
+        kps[kps_id, :2] = kps_xy
+        kps[kps_id, 2] = 1
+
+        return kps
+
+    def __getitem__(self, index, square=True):
+        pair_i = self.instances[index]
+        class_name = pair_i["category"]
+        class_dict = self.image_annotations[class_name]
+        _, view_i, view_j = pair_i["filename"].split(":")[0].split("-")
+
+        # gett bounding boxes
+        bbx_i = pair_i["src_bndbox"] if self.use_bbox else None
+        bbx_j = pair_i["trg_bndbox"] if self.use_bbox else None
+
+        kps_i = self.process_keypoints(class_dict[view_i]["kps"], bbx_i)
+        kps_j = self.process_keypoints(class_dict[view_j]["kps"], bbx_j)
+
+        img_i = self.get_image(class_name, view_i, bbox=bbx_i, square=square)
+        seg_i = self.get_mask(class_name, view_i, bbox=bbx_i, square=square)
+        img_j = self.get_image(class_name, view_j, bbx_j, square=square)
+        seg_j = self.get_mask(class_name, view_j, bbox=bbx_j, square=square)
+
+        # transform image
+        hw_i = img_i.size[0]
+        hw_j = img_j.size[0]
+
+        if not self.use_bbox:
+            l, u, r, d = pair_i["trg_bndbox"]
+            max_bbox = max(r - l, d - u)
+            max_idim = max(pair_i["trg_imsize"][:2])
+            thresh_scale = float(max_bbox) / max_idim
+        else:
+            thresh_scale = 1.0
+
+        # transform images
+        img_i = self.image_transform(img_i)
+        img_j = self.image_transform(img_j)
+        seg_i = self.mask_transform(seg_i)
+        seg_j = self.mask_transform(seg_j)
+        kps_i[:, :2] = kps_i[:, :2] * self.image_size / hw_i
+        kps_j[:, :2] = kps_j[:, :2] * self.image_size / hw_j
+
+        return img_i, seg_i, kps_i, img_j, seg_j, kps_j, thresh_scale, class_name
+
+    def __len__(self):
+        return len(self.instances)
+
+    def get_image(self, class_name, image_name, bbox=None, square=False):
+        rel_path = f"JPEGImages/{class_name}/{image_name}.jpg"
+        path = os.path.join(self.root, rel_path)
+
+        with Image.open(path) as f:
+            image = np.array(f)
+
+        if bbox:
+            l, u, r, d = bbox
+            # if square:
+            #     max_hw = max(d-u, r-l)
+            #     h, w, _ = image.shape
+            #     d = min(u + max_hw, h)
+            #     r = min(l + max_hw, w)
+
+            image = image[u:d, l:r]
+
+        if square:
+            h, w, _ = image.shape
+            max_hw = max(h, w)
+            image = np.pad(
+                image, ((0, max_hw - h), (0, max_hw - w), (0, 0)), constant_values=255
+            )
+
+        return Image.fromarray(image)
+
+    def get_mask(self, class_name, image_name, bbox=None, square=False):
+        rel_path = f"Segmentation/{class_name}/{image_name}.png"
+        path = os.path.join(self.root, rel_path)
+
+        with Image.open(path) as img:
+            image = np.array(img)
+
+        if bbox:
+            l, u, r, d = bbox
+            image = image[u:d, l:r]
+
+        if square:
+            h, w = image.shape
+            max_hw = max(h, w)
+            image = np.pad(image, ((0, max_hw - h), (0, max_hw - w)))
+
+        # big assumption of no other same class within bbox (or image)
+        class_id = CLASS_IDS[class_name]
+        image = (image == class_id).astype(float) * 255
+
+        return Image.fromarray(image)
+
+    def get_pair_annotations(self):
+        split_names = {"train": "trn", "valid": "val", "test": "test"}
+        split = split_names[self.split]
+
+        annot_path = os.path.join(self.root, "PairAnnotation", split)
+        annot_files = glob.glob(os.path.join(annot_path, "*.json"))
+        annots = [json.load(open(_path)) for _path in annot_files]
+        return annots
+
+    def get_image_annotations(self):
+        annot_path = os.path.join(self.root, "ImageAnnotation")
+        classes = os.listdir(annot_path)
+
+        image_annots = {_c: {} for _c in classes}
+
+        for _cls in classes:
+            annot_files = glob.glob(os.path.join(annot_path, f"{_cls}/*.json"))
+            annots = [json.load(open(_path)) for _path in annot_files]
+            annots = {_a["filename"].split(".")[0]: _a for _a in annots}
+            image_annots[_cls] = annots
+
+        return image_annots
+    
 class YVOSDataset(VideoDataset):
 
     def __init__(self, classes_directory, annotations_directory, sampling_mode, num_clips, num_frames, frame_transform=None, target_transform=None, video_transform=None, meta_file_directory=None, regular_step=1) -> None:
@@ -576,7 +1188,6 @@ class VOCDataset(Dataset):
         self.images = [os.path.join(image_dir, x + ".jpg") for x in file_names]
         self.masks = [os.path.join(seg_dir, x + ".png") for x in file_names]
         self.return_masks = return_masks
-
         assert all([Path(f).is_file() for f in self.masks]) and all([Path(f).is_file() for f in self.images])
 
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
@@ -691,12 +1302,13 @@ class VideoDataModule():
         self.rank = rank
         self.sampler = None
         self.data_loader = None
+        self.subset_name = "train"
         print("Class Directory:", self.class_directory)
         print("Annotations Directory:", self.annotations_directory)
         print("Meta File Path:", self.meta_file_path)
 
 
-    
+
     def setup(self, transforms_dict):
         data_transforms = transforms_dict["data_transforms"]
         target_transforms = transforms_dict["target_transforms"]
@@ -707,6 +1319,17 @@ class VideoDataModule():
             self.dataset = YVOSDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         elif self.name == "kinetics":
             self.dataset = Kinetics(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
+        elif self.name == "co3d":
+            print('using CO3D dataset')
+            self.dataset = CO3DDataset(
+                subset_name='manyview_dev_1',
+                sampling_mode=self.sampling_mode,
+                num_clips=self.num_clips,
+                num_frames=self.num_clip_frames,
+                frame_transform=data_transforms,
+                target_transform=target_transforms,
+                video_transform=shared_transforms,
+            )      
         else:
             self.dataset = VideoDataset(self.class_directory, self.annotations_directory, self.sampling_mode, self.num_clips, self.num_clip_frames, data_transforms, target_transforms, shared_transforms, self.meta_file_path, self.regular_step)
         print(f"Dataset size : {len(self.dataset)}")

@@ -16,7 +16,11 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import StepLR
 from eval_metrics import PredsmIoU
 from clustering import PerDatasetClustering
-import torch.nn.functional as F
+import torch.nn.functional as nn_F
+
+import torch
+from einops import einsum
+from tqdm import tqdm
 
 class LinearFinetune(torch.nn.Module):
     def __init__(self, model, num_classes: int, lr: float, input_size: int, spatial_res: int, val_iters: int,
@@ -177,4 +181,154 @@ class LinearFinetuneModule():
         print('miou_val', round(miou, 6))
         return final_miou
 
+def argmax_2d(x, max_value=True):
+    h, w = x.shape[-2:]
+    x = torch.flatten(x, start_dim=-2)
+    if max_value:
+        flat_indices = x.argmax(dim=-1)
+    else:
+        flat_indices = x.argmin(dim=-1)
 
+    min_row = flat_indices // w
+    min_col = flat_indices % w
+    xy_indices = torch.stack((min_col, min_row), dim=-1)
+    return xy_indices
+
+class KeypointMatchingModule():
+    def __init__(self, model, dataset, device, threshold=0.10):
+        """
+        Initialize the Keypoint Matching Evaluation module.
+        Args:
+            model: The feature extractor model to evaluate.
+            dataset: The SPair dataset for keypoint matching evaluation.
+            device: Device to perform computations on ('cuda' or 'cpu').
+            threshold: Distance threshold for keypoint matching success.
+        """
+        self.model = model
+        self.dataset = dataset
+        self.device = device
+        self.threshold = threshold
+        self.model.to(self.device)
+        self.model.eval()
+    
+    @torch.no_grad()
+    def compute_errors(self, instance, mask_feats=False, return_heatmaps=False):
+        img_i, mask_i, kps_i, img_j, mask_j, kps_j, thresh_scale, _ = instance
+        mask_i = torch.tensor(np.array(mask_i, dtype=float))
+        mask_j = torch.tensor(np.array(mask_j, dtype=float))
+
+        images = torch.stack((img_i, img_j)).cuda()
+        masks = torch.stack((mask_i, mask_j)).cuda()
+        masks = torch.nn.functional.avg_pool2d(masks.float(), 16)
+        masks = masks > 4 / (16**2)
+
+        #feats = model(images)
+        feats, _ = self.model.feature_extractor.forward_features(images)
+        if self.model.model_type == "registers":
+                # Exclude registers during validation
+                feats = feats[:, :-8, :]  # Last 8 are registers
+        if isinstance(feats, dict):
+            print("using patchtokens")
+            feats = feats.get("x_norm_patchtokens", feats)
+        # if isinstance(feats, list):
+        #     print("using list")
+        #     feats = torch.cat(feats, dim=1)
+        batch_size, num_patches, channels = feats.shape
+        #print(f"batch_size {batch_size} num_patches {num_patches}, channels {channels}")
+        grid_size = int(num_patches ** 0.5)
+
+
+        if grid_size ** 2 == num_patches:
+            # Directly reshape since it forms a square grid
+            feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
+            #print(f"Final reshaped feature shape (no CLS token): {feats.shape}")
+
+        # Case 2: CLS token is included, remove it and reshape
+        elif grid_size ** 2 == num_patches - 1:
+            #print("Removing the CLS token to align shapes.")
+            feats = feats[:, 1:]  # Remove CLS token
+            batch_size, num_patches, channels = feats.shape
+            grid_size = int(num_patches ** 0.5)
+            feats = feats.view(batch_size, grid_size, grid_size, channels).permute(0, 3, 1, 2)
+
+        feats = nn_F.normalize(feats, p=2, dim=1)
+
+
+        if mask_feats:
+            feats = feats * masks
+
+        feats_i = feats[0]
+        feats_j = feats[1]
+
+        # normalize kps to [0, 1]
+        assert images.shape[-1] == images.shape[-2], "assuming square images here"
+        kps_i = kps_i.float()
+        kps_j = kps_j.float()
+        kps_i[:, :2] = kps_i[:, :2] / images.shape[-1]
+        kps_j[:, :2] = kps_j[:, :2] / images.shape[-1]
+
+        # get correspondences
+        kps_i_ndc = (kps_i[:, :2].float() * 2 - 1)[None, None].cuda()
+        kp_i_F = nn_F.grid_sample(
+            feats_i[None, :], kps_i_ndc, mode="bilinear", align_corners=True
+        )
+        kp_i_F = kp_i_F[0, :, 0].t()
+
+        # get max index in [0,1] range
+        heatmaps = einsum(kp_i_F, feats_j, "k f, f h w -> k h w")
+        pred_kp = argmax_2d(heatmaps, max_value=True).float().cpu() / feats.shape[-1]
+
+        # compute error and scale to threshold (for all pairs)
+        errors = (pred_kp[:, None, :] - kps_j[None, :, :2]).norm(p=2, dim=-1)
+        errors = errors / thresh_scale
+
+        # only retain keypoints in both (for now)
+        valid_kps = (kps_i[:, None, 2] * kps_j[None, :, 2]) == 1
+        in_both = valid_kps.diagonal()
+
+        # max error should be 1, so this excludes invalid from NN-search
+        errors[valid_kps.logical_not()] = 1e3
+
+        error_same = errors.diagonal()[in_both]
+        error_nn, index_nn = errors[in_both].min(dim=1)
+        index_same = in_both.nonzero().squeeze(1)
+
+        if return_heatmaps:
+            return error_same, error_nn, index_same, index_nn, heatmaps
+        else:
+            return error_same, error_nn, index_same, index_nn
+
+    @torch.no_grad()
+    def evaluate_dataset(self, dataset, thresh, verbose=False):
+        pbar = tqdm(range(len(dataset)), ncols=60) if verbose else range(len(dataset))
+        error_output = [self.compute_errors(self.dataset[i]) for i in pbar]
+
+        errors = torch.cat([_err[0] for _err in error_output])
+        src_ind = torch.cat([_err[2] for _err in error_output])
+        tgt_ind = torch.cat([_err[3] for _err in error_output])
+
+        # compute confusion matrix
+        kp_max = max(src_ind.max(), tgt_ind.max()) + 1
+        confusion = torch.zeros((kp_max, kp_max))
+        for src, tgt in torch.stack((src_ind, tgt_ind), dim=1):
+            confusion[src, tgt] += 1
+
+        # compute recall
+        recall = (errors < thresh).float().mean().item() * 100.0
+
+        return recall, confusion
+    
+    @torch.no_grad()
+    def evaluate(self):
+        """
+        Evaluate the model on keypoint matching over the dataset.
+        Returns:
+            recall: Keypoint matching recall score.
+        """
+        all_errors = []
+        for i in tqdm(range(len(self.dataset)), ncols=60):
+            errors_same, errors_nn = self.compute_errors(self.dataset[i])
+            all_errors.extend(errors_same)
+        
+        recall = (torch.tensor(all_errors) < self.threshold).float().mean().item() * 100.0
+        return recall
