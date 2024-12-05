@@ -569,7 +569,7 @@ class CO3DDataset(Dataset):
         frame_transform=None, 
         target_transform=None, 
         video_transform=None, 
-        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping.json"
+        mapping_path="/home/isimion1/timet/Timetuning_v2/all_frames.json"
     ):
         """
         CO3D Dataset loader.
@@ -598,10 +598,44 @@ class CO3DDataset(Dataset):
         self.frame_transform = frame_transform
         self.target_transform = target_transform
         self.video_transform = video_transform
-        self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
+        #self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
+        self.dataset_structure = self.create_frame_to_zip_mapping(mapping_path=mapping_path)
+    
+    def create_frame_to_zip_mapping(self, mapping_path):
+        """
+        Create a mapping of frames to their corresponding zip files
 
+        Args:
+            zip_mapping (dict): Mapping of categories to zip file paths.
+            mapping_path (str): Path to save the resulting frame-to-zip mapping.
+        """
+        print("Processing categories from zip mapping...")
+        frame_to_zip = defaultdict(lambda: defaultdict(list))
 
-    def prepare_data(self, mapping_path):
+        # Process each category
+        for category, zip_files in self.zip_mapping.items():
+            print(f"Processing category: {category}")
+            
+            # Process each zip file in the category
+            for zip_file in zip_files:
+                print(f"Processing zip: {zip_file}")
+                with ZipFile(zip_file, 'r') as zf:
+                    for file_path in zf.namelist():
+                        # Only consider paths inside the 'images' folder of the category
+                        if file_path.startswith(f"{category}/") and "images/" in file_path:
+                            parts = file_path.split("/")
+                            if len(parts) >= 3:
+                                sequence = parts[1]  # Extract the sequence folder name
+                                frame_path = "/".join(parts[1:])  # Full relative frame path
+                                frame_to_zip[category][sequence].append((frame_path, zip_file))
+        
+        # Save the mapping to a JSON file
+        with open(mapping_path, "w") as f:
+            json.dump(frame_to_zip, f, indent=4)
+
+        print(f"Frame-to-zip mapping saved to {mapping_path}")
+
+    def prepare_data2(self, mapping_path):
         """Parse zips, locate set_lists, and save frame-to-zip mapping."""
         # Check if the mapping already exists
         if os.path.exists(mapping_path):
