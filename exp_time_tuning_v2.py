@@ -439,7 +439,7 @@ def run(args):
             image_size=224,
             image_mean="imagenet",
             class_name= None, # loop over classes in val if we want a per class recall
-            num_instances=40000,
+            num_instances=5000,
             vp_diff=vp_diff,
         )
         print(f'Length of SPair Dataset: {len(spair_dataset)}')
