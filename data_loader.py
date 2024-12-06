@@ -787,22 +787,22 @@ class CO3DDataset(Dataset):
         if not frame_images:
             raise ValueError(f"No frames could be loaded for sequence '{sequence_name}' in category '{category}'.")
 
-        # Apply frame-level transformations
+        # Apply frame-level transformations to all frames in batch
         if self.frame_transform:
-            frame_images = [self.frame_transform(img) for img in frame_images]
+            frame_images = self.frame_transform(frame_images)  # Ensure batch compatibility
 
-        # Apply video-level transformations
+        # Apply video-level transformations to all frames
         if self.video_transform:
             frame_images = self.video_transform(frame_images)
 
-        # Convert the list of images into a tensor
-        frame_images_tensor = torch.stack(
+        # Convert the frames into a tensor
+        frame_images = torch.stack(
             [transforms.ToTensor()(img) if isinstance(img, Image.Image) else img for img in frame_images]
         )
 
         # Return the frames and an empty annotation tensor
         empty_annotation = torch.empty(0)
-        return frame_images_tensor, empty_annotation
+        return frame_images, empty_annotation
 
 
 
