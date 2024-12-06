@@ -601,12 +601,13 @@ class CO3DDataset(Dataset):
         #self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
         self.dataset_structure = self.create_frame_to_zip_mapping(mapping_path=mapping_path)
     
-    def create_frame_to_zip_mapping(self, mapping_path):
+    def create_frame_to_zip_mapping(self, mapping_path, min_frames=10):
         """
         Create a mapping of frames to their corresponding zip files.
 
         Args:
             mapping_path (str): Path to save the resulting frame-to-zip mapping.
+            min_frames (int): Minimum number of frames required for a sequence to be included.
         """
         if os.path.exists(mapping_path):
             print(f"Loading frame-to-zip mapping from {mapping_path}")
@@ -637,9 +638,12 @@ class CO3DDataset(Dataset):
                                     frame_path = "/".join(parts[1:])  # Full relative frame path
                                     sequence_frames[sequence].append((frame_path, zip_file))
 
-            # Add frames to the mapping, sorted by filename
+            # Add frames to the mapping, sorted by filename, only if enough frames exist
             for sequence, frames in sequence_frames.items():
-                frame_to_zip[category][sequence] = sorted(frames, key=lambda x: x[0])
+                if len(frames) >= min_frames:
+                    frame_to_zip[category][sequence] = sorted(frames, key=lambda x: x[0])
+                else:
+                    print(f"Skipping sequence '{sequence}' in category '{category}' (only {len(frames)} frames).")
 
         # Save the mapping to a JSON file
         with open(mapping_path, "w") as f:
@@ -647,6 +651,7 @@ class CO3DDataset(Dataset):
 
         print(f"Frame-to-zip mapping saved to {mapping_path}")
         return frame_to_zip
+
 
 
     def prepare_data2(self, mapping_path):
@@ -714,40 +719,30 @@ class CO3DDataset(Dataset):
         
         return structure
 
+    def load_image2(self, zip_path, file_path):
+        """Load an image directly from a zip."""
+        file_data = self.stream_file(zip_path, file_path)
+        return Image.open(file_data)
+
     def stream_file(self, zip_path, file_path):
         """Stream a file from a zip."""
         with ZipFile(zip_path, 'r') as zf:
             with zf.open(file_path) as f:
                 return io.BytesIO(f.read())
 
-    def load_image2(self, zip_path, file_path):
-        """Load an image directly from a zip."""
-        file_data = self.stream_file(zip_path, file_path)
-        return Image.open(file_data)
-
     def load_image(self, zip_path, file_path):
-        """Load an image directly from a zip."""
+        """Load a JPG image directly from a zip."""
         try:
-            # Stream the file into BytesIO
+            # Stream the file and open as an image
             file_data = self.stream_file(zip_path, file_path)
-            file_data.seek(0)  # Ensure we're at the start of the BytesIO object
-
-            # Debug: Check the size of the data
-            print(f"Loaded file size: {len(file_data.getvalue())} bytes")
-
-            # Debug: Check the file's magic number
-            magic_number = file_data.read(2)
-            print(f"Magic number: {magic_number}")
-            file_data.seek(0)  # Reset pointer for Image.open()
-
-            # Attempt to open the image
-            return Image.open(file_data).convert("RGB")  # Convert to RGB to handle all modes
-        except UnidentifiedImageError as e:
-            print(f"UnidentifiedImageError: Cannot open image {file_path} in {zip_path}: {e}")
+            return Image.open(file_data).convert("RGB")  # Convert to RGB
+        except UnidentifiedImageError:
+            print(f"UnidentifiedImageError: Could not load image {file_path} in {zip_path}.")
             return None
         except Exception as e:
-            print(f"General error while loading image {file_path}: {e}")
+            print(f"Error loading image {file_path} from {zip_path}: {e}")
             return None
+
 
 
     def __len__(self):
