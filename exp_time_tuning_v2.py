@@ -496,7 +496,7 @@ if __name__ == "__main__":
     parser.add_argument('--training_set', type=str, choices=['ytvos', 'co3d'], default='ytvos')
     parser.add_argument('--spair_val', type=float, default=False)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--num_workers', type=int, default=12)
+    parser.add_argument('--num_workers', type=int, default=0)#12 put 0 for debugging
     parser.add_argument('--input_size', type=int, default=224)
     parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)

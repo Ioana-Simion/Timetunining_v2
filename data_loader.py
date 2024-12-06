@@ -772,62 +772,56 @@ class CO3DDataset(Dataset):
         return indices
 
     def __getitem__(self, index):
-        """
-        Get a sample from the dataset based on the index.
-
-        Args:
-            index (int): Index of the sample.
-
-        Returns:
-            tuple: (frames, annotations), where frames is a tensor of shape 
-                (num_frames, C, H, W), and annotations is an empty tensor.
-        """
-        # Flatten the dataset structure into a list of (category, sequence) pairs
+        # Retrieve the category and sequence based on the index
         flat_structure = [
-            (category, sequence_name) 
-            for category, sequences in self.dataset_structure.items() 
+            (category, sequence_name)
+            for category, sequences in self.dataset_structure.items()
             for sequence_name in sequences
         ]
-
-        # Get the category and sequence corresponding to the index
         category, sequence_name = flat_structure[index]
         frame_info = self.dataset_structure[category][sequence_name]
-        num_available_frames = len(frame_info)
-        print(f"Category: {category}, Sequence: {sequence_name}, Num frames: {num_available_frames}")
-        # Generate indices based on the sampling mode
-        indices = self.generate_indices(size=num_available_frames, sampling_num=self.num_frames)[0]
+        total_frames = len(frame_info)
+        print(f"Category: {category}, Sequence: {sequence_name}, Num frames: {total_frames}")
+        
+        # Generate indices for frame sampling
+        indices = self.generate_indices(total_frames, self.num_frames)
+        indices = indices[0]  # Since we generate multiple clips, take the first set of indices
 
-        # Load frames from their respective zips
+        # Load the sampled frames from their respective zips
         frame_images = []
         for idx in indices:
             frame_path, zip_path = frame_info[idx]
-            full_frame_path = f"{category}/{frame_path}"
             try:
-                img = self.load_image(zip_path, full_frame_path)  # Load the image as PIL.Image
+                img = self.load_image(zip_path, frame_path)
+                if img is None:
+                    print(f"Warning: Failed to load image at {frame_path} in {zip_path}.")
+                    continue
                 frame_images.append(img)
-            except FileNotFoundError as e:
-                print(f"Frame '{full_frame_path}' not found in '{zip_path}'. Skipping...")
+            except FileNotFoundError:
+                print(f"Frame '{frame_path}' not found in '{zip_path}'. Skipping...")
                 continue
 
         if not frame_images:
             raise ValueError(f"No frames could be loaded for sequence '{sequence_name}' in category '{category}'.")
 
-        # Apply frame-level transformations to all frames in batch
+        # Apply frame-level transformations
+        frame_images = [img for img in frame_images if img is not None]
         if self.frame_transform:
-            frame_images = self.frame_transform(frame_images)  # Ensure batch compatibility
+            print("Applying frame-level transformations...")
+            frame_images = self.frame_transform(frame_images)
 
-        # Apply video-level transformations to all frames
+        # Apply video-level transformations
         if self.video_transform:
+            print("Applying video-level transformations...")
             frame_images = self.video_transform(frame_images)
 
-        # Convert the frames into a tensor
+        # Convert the list of images into a tensor
         frame_images = torch.stack(
             [transforms.ToTensor()(img) if isinstance(img, Image.Image) else img for img in frame_images]
         )
+        return frame_images, torch.empty(0)
 
-        # Return the frames and an empty annotation tensor
-        empty_annotation = torch.empty(0)
-        return frame_images, empty_annotation
+
 
 
 
