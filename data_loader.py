@@ -776,11 +776,12 @@ class CO3DDataset(Dataset):
         frame_images = []
         for idx in indices:
             frame_path, zip_path = frame_info[idx]
+            full_frame_path = f"{category}/{frame_path}"
             try:
-                img = self.load_image(zip_path, frame_path)  # Load the image as PIL.Image
+                img = self.load_image(zip_path, full_frame_path)  # Load the image as PIL.Image
                 frame_images.append(img)
             except FileNotFoundError as e:
-                print(f"Frame '{frame_path}' not found in '{zip_path}'. Skipping...")
+                print(f"Frame '{full_frame_path}' not found in '{zip_path}'. Skipping...")
                 continue
 
         if not frame_images:
