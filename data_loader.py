@@ -606,9 +606,12 @@ class CO3DDataset(Dataset):
         Create a mapping of frames to their corresponding zip files
 
         Args:
-            zip_mapping (dict): Mapping of categories to zip file paths.
             mapping_path (str): Path to save the resulting frame-to-zip mapping.
         """
+        if os.path.exists(mapping_path):
+            print(f"Loading frame-to-zip mapping from {mapping_path}")
+            with open(mapping_path, "r") as f:
+                return json.load(f)
         print("Processing categories from zip mapping...")
         frame_to_zip = defaultdict(lambda: defaultdict(list))
 
@@ -634,6 +637,7 @@ class CO3DDataset(Dataset):
             json.dump(frame_to_zip, f, indent=4)
 
         print(f"Frame-to-zip mapping saved to {mapping_path}")
+        return frame_to_zip
 
     def prepare_data2(self, mapping_path):
         """Parse zips, locate set_lists, and save frame-to-zip mapping."""
@@ -700,8 +704,6 @@ class CO3DDataset(Dataset):
         
         return structure
 
-
-
     def stream_file(self, zip_path, file_path):
         """Stream a file from a zip."""
         with ZipFile(zip_path, 'r') as zf:
@@ -716,18 +718,45 @@ class CO3DDataset(Dataset):
     def __len__(self):
         """Return the total number of category-sequence pairs."""
         return sum(len(sequences) for sequences in self.dataset_structure.values())
+    
+    def generate_indices(self, size, sampling_num):
+        indices = []
+        for i in range(self.num_clips):
+            if self.sampling_mode == SamplingMode.UNIFORM:
+                    if size < sampling_num:
+                        ## sample repeatly
+                        idx = random.choices(range(0, size), k=sampling_num)
+                    else:
+                        idx = random.sample(range(0, size), sampling_num)
+                    idx.sort()
+                    indices.append(idx)
+            elif self.sampling_mode == SamplingMode.DENSE:
+                    base = random.randint(0, size - sampling_num)
+                    idx = range(base, base + sampling_num)
+                    indices.append(idx)
+            elif self.sampling_mode == SamplingMode.Full:
+                    indices.append(range(0, size))
+            elif self.sampling_mode == SamplingMode.Regular:
+                if size < sampling_num * self.regular_step:
+                    step = size // sampling_num
+                else:
+                    step = self.regular_step
+                base = random.randint(0, size - (sampling_num * step))
+                idx = range(base, base + (sampling_num * step), step)
+                indices.append(idx)
+        return indices
 
     def __getitem__(self, index):
         """
-        Get a sample from the dataset.
+        Get a sample from the dataset based on the index.
 
         Args:
             index (int): Index of the sample.
 
         Returns:
-            tuple: (frames, category, sequence_name).
+            tuple: (frames, annotations), where frames is a tensor of shape 
+                (num_frames, C, H, W), and annotations is an empty tensor.
         """
-        print(f"Index: {index}")
         # Flatten the dataset structure into a list of (category, sequence) pairs
         flat_structure = [
             (category, sequence_name) 
@@ -737,14 +766,16 @@ class CO3DDataset(Dataset):
 
         # Get the category and sequence corresponding to the index
         category, sequence_name = flat_structure[index]
-        frame_info = self.dataset_structure[category][sequence_name][:self.num_frames]
-
-        print(f"Accessing category: {category}, sequence: {sequence_name}")
-        print(f"Frame info: {frame_info}")
+        frame_info = self.dataset_structure[category][sequence_name]
+        num_available_frames = len(frame_info)
+        print(f"Category: {category}, Sequence: {sequence_name}, Num frames: {num_available_frames}")
+        # Generate indices based on the sampling mode
+        indices = self.generate_indices(size=num_available_frames, sampling_num=self.num_frames)[0]
 
         # Load frames from their respective zips
         frame_images = []
-        for frame_path, zip_path in frame_info:
+        for idx in indices:
+            frame_path, zip_path = frame_info[idx]
             try:
                 img = self.load_image(zip_path, frame_path)  # Load the image as PIL.Image
                 frame_images.append(img)
@@ -757,19 +788,20 @@ class CO3DDataset(Dataset):
 
         # Apply frame-level transformations
         if self.frame_transform:
-            frame_images = self.frame_transform(frame_images)
+            frame_images = [self.frame_transform(img) for img in frame_images]
 
         # Apply video-level transformations
         if self.video_transform:
             frame_images = self.video_transform(frame_images)
 
         # Convert the list of images into a tensor
-        frame_images = torch.stack(
+        frame_images_tensor = torch.stack(
             [transforms.ToTensor()(img) if isinstance(img, Image.Image) else img for img in frame_images]
         )
-        empty_annotation = torch.empty(0)
-        return frame_images, empty_annotation
 
+        # Return the frames and an empty annotation tensor
+        empty_annotation = torch.empty(0)
+        return frame_images_tensor, empty_annotation
 
 
 
