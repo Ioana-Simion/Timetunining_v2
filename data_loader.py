@@ -786,7 +786,7 @@ class CO3DDataset(Dataset):
         category, sequence_name = flat_structure[index]
         frame_info = self.dataset_structure[category][sequence_name]
         total_frames = len(frame_info)
-        print(f"Category: {category}, Sequence: {sequence_name}, Num frames: {total_frames}")
+        #print(f"Category: {category}, Sequence: {sequence_name}, Num frames: {total_frames}")
         
         # Generate indices for frame sampling
         indices = self.generate_indices(total_frames, self.num_frames)
@@ -813,12 +813,12 @@ class CO3DDataset(Dataset):
         # Apply frame-level transformations
         frame_images = [img for img in frame_images if img is not None]
         if self.frame_transform:
-            print("Applying frame-level transformations...")
+            #print("Applying frame-level transformations...")
             frame_images = self.frame_transform(frame_images)
 
         # Apply video-level transformations
         if self.video_transform:
-            print("Applying video-level transformations...")
+            #print("Applying video-level transformations...")
             frame_images = self.video_transform(frame_images)
 
         # Convert the list of images into a tensor

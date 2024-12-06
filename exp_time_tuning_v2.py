@@ -265,7 +265,7 @@ class TimeTuningV2Trainer():
                         checkpoint_dir = "checkpoints"
                         if not os.path.exists(checkpoint_dir):
                             os.makedirs(checkpoint_dir)
-                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED.pth")
                         torch.save(self.time_tuning_model.state_dict(), save_path)
                         print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
                 else:
@@ -321,7 +321,7 @@ class TimeTuningV2Trainer():
             if jac > 0.175: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -330,7 +330,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
@@ -496,7 +496,7 @@ if __name__ == "__main__":
     parser.add_argument('--training_set', type=str, choices=['ytvos', 'co3d'], default='ytvos')
     parser.add_argument('--spair_val', type=float, default=False)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--num_workers', type=int, default=0)#12 put 0 for debugging
+    parser.add_argument('--num_workers', type=int, default=12)#12 put 0 for debugging
     parser.add_argument('--input_size', type=int, default=224)
     parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)
