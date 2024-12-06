@@ -9,7 +9,7 @@ from torchvision.datasets import ImageFolder
 from torch.utils.data import Dataset
 import glob
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from typing import Tuple, Any
 from pathlib import Path
 from typing import Optional, Callable
@@ -710,10 +710,35 @@ class CO3DDataset(Dataset):
             with zf.open(file_path) as f:
                 return io.BytesIO(f.read())
 
-    def load_image(self, zip_path, file_path):
+    def load_image2(self, zip_path, file_path):
         """Load an image directly from a zip."""
         file_data = self.stream_file(zip_path, file_path)
         return Image.open(file_data)
+
+    def load_image(self, zip_path, file_path):
+        """Load an image directly from a zip."""
+        try:
+            # Stream the file into BytesIO
+            file_data = self.stream_file(zip_path, file_path)
+            file_data.seek(0)  # Ensure we're at the start of the BytesIO object
+
+            # Debug: Check the size of the data
+            print(f"Loaded file size: {len(file_data.getvalue())} bytes")
+
+            # Debug: Check the file's magic number
+            magic_number = file_data.read(2)
+            print(f"Magic number: {magic_number}")
+            file_data.seek(0)  # Reset pointer for Image.open()
+
+            # Attempt to open the image
+            return Image.open(file_data).convert("RGB")  # Convert to RGB to handle all modes
+        except UnidentifiedImageError as e:
+            print(f"UnidentifiedImageError: Cannot open image {file_path} in {zip_path}: {e}")
+            return None
+        except Exception as e:
+            print(f"General error while loading image {file_path}: {e}")
+            return None
+
 
     def __len__(self):
         """Return the total number of category-sequence pairs."""
