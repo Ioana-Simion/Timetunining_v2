@@ -251,8 +251,9 @@ class TimeTuningV2Trainer():
             # if epoch % 1 == 0:
             #     self.validate(epoch)
             if self.spair_val:
-                if epoch % 20 == 0: # 2 only for debuggingt then we do evey 10/20
+                if epoch % 10 == 0: # 2 only for debuggingt then we do evey 10/20
                     self.validate(epoch)
+                else:
                     eval_model = copy.deepcopy(self.time_tuning_model)
                     eval_model.eval()
                     self.time_tuning_model.eval()
@@ -265,11 +266,9 @@ class TimeTuningV2Trainer():
                         checkpoint_dir = "checkpoints"
                         if not os.path.exists(checkpoint_dir):
                             os.makedirs(checkpoint_dir)
-                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED.pth")
+                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg.pth")
                         torch.save(self.time_tuning_model.state_dict(), save_path)
                         print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
-                else:
-                    self.validate(epoch)
             else:
                 self.validate(epoch)
             self.train_one_epoch()
@@ -318,10 +317,10 @@ class TimeTuningV2Trainer():
                 os.makedirs(checkpoint_dir)
 
             #threshold = 0.143
-            if jac > 0.175: #self.best_miou:
+            if jac > self.best_miou: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -330,7 +329,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
@@ -446,9 +445,9 @@ def run(args):
     if args.model_type == 'dino':
         vit_model = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
     elif args.model_type == 'dinov2':
-        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
-        #vit_model = vit_model.backbone
+        #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
+        vit_model = vit_model.backbone
         # print(f'Vit model loaded: {vit_model}')
         # print(f'DIR Vit model loaded: {dir(vit_model)}') 
         #vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
