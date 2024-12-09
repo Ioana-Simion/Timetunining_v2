@@ -251,24 +251,24 @@ class TimeTuningV2Trainer():
             # if epoch % 1 == 0:
             #     self.validate(epoch)
             if self.spair_val:
-                if epoch % 10 == 0: # 2 only for debuggingt then we do evey 10/20
-                    self.validate(epoch)
-                else:
-                    eval_model = copy.deepcopy(self.time_tuning_model)
-                    eval_model.eval()
-                    self.time_tuning_model.eval()
-                    self.keypoint_matching_module = KeypointMatchingModule(eval_model, self.spair_dataset, self.device)
-                    recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
-                    self.logger.log({"keypoint_matching_recall": recall})
-                    print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
-                    if recall > self.best_recall:
-                        self.best_recall = recall
-                        checkpoint_dir = "checkpoints"
-                        if not os.path.exists(checkpoint_dir):
-                            os.makedirs(checkpoint_dir)
-                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg.pth")
-                        torch.save(self.time_tuning_model.state_dict(), save_path)
-                        print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
+                #if epoch % 10 == 0: # 2 only for debuggingt then we do evey 10/20
+                self.validate(epoch)
+                #else:
+                eval_model = copy.deepcopy(self.time_tuning_model)
+                eval_model.eval()
+                self.time_tuning_model.eval()
+                self.keypoint_matching_module = KeypointMatchingModule(eval_model, self.spair_dataset, self.device)
+                recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
+                self.logger.log({"keypoint_matching_recall": recall})
+                print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
+                if recall > self.best_recall:
+                    self.best_recall = recall
+                    checkpoint_dir = "checkpoints"
+                    if not os.path.exists(checkpoint_dir):
+                        os.makedirs(checkpoint_dir)
+                    save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg2.pth")
+                    torch.save(self.time_tuning_model.state_dict(), save_path)
+                    print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
             else:
                 self.validate(epoch)
             self.train_one_epoch()
@@ -320,7 +320,7 @@ class TimeTuningV2Trainer():
             if jac > self.best_miou: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg.pth")
+                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg2.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -329,7 +329,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg2.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
