@@ -100,23 +100,25 @@ class TimeTuningV2(torch.nn.Module):
 
         if self.use_neco_loss:
             # Use the last frame as the anchor
-            anchor_features = student_features[:, -1, :, :, :]  # Last frame (B, H, W, D)
-            query_features = student_features[:, :-1, :, :, :]  # All other frames (B, T-1, H, W, D)
-            query_features = query_features.view(-1, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
+            anchor_features = student_features[:, -1, :, :, :]  # Shape: (B, H, W, D)
+
+            # Use all other frames (Fs) across the batch
+            query_features = student_features[:, :-1, :, :, :].reshape(-1, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)  # Shape: (B*(T-1), H, W, D)
+
             if annotations is not None:
                 unique_classes = torch.unique(annotations).tolist()
                 print(f"Classes in batch: {unique_classes}")
 
-            # ROI alignment using FeatureForwarder
+            # ROI alignment using FeatureForwarder for both anchor and query
             aligned_anchor, _ = self.FF.label_propagation(
-                feature_tar=anchor_features,  # Ft (teacher output)
-                list_frame_feats=[anchor_features],  # Aligning Ft with itself for consistency
-                list_segs=[query_features]
+                feature_tar=anchor_features,
+                list_frame_feats=[anchor_features],  # Align Ft with itself
+                list_segs=[query_features],  # Placeholder
             )
             aligned_query, _ = self.FF.label_propagation(
-                feature_tar=query_features,  # Fs (student output)
-                list_frame_feats=[anchor_features],  # Aligning Fs to Ft
-                list_segs=[query_features]
+                feature_tar=query_features,
+                list_frame_feats=[anchor_features],  # Align Fs to Ft
+                list_segs=[query_features],
             )
 
             # Flatten embeddings for pairwise comparison
@@ -179,6 +181,7 @@ class TimeTuningV2(torch.nn.Module):
             loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
 
         return loss
+
 
     
 
