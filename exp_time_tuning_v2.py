@@ -542,7 +542,7 @@ def run(args):
         vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
         vit_model = vit_model.backbone
         print(hasattr(vit_model, 'forward_features'))
-    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type, training_set = args.training_set)
+    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type, training_set = args.training_set, use_neco_loss=args.use_neco_loss)
     optimization_config = {
         'init_lr': 1e-4,
         'peak_lr': 1e-3,
