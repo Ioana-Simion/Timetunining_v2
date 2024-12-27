@@ -43,7 +43,7 @@ torch.cuda.manual_seed(1)
 
 
 class TimeTuningV2(torch.nn.Module):
-    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino', training_set = 'ytvos'):
+    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino', training_set = 'ytvos', use_neco_loss=False):
         super(TimeTuningV2, self).__init__()
         self.input_size = input_size
         if model_type == 'dino':
@@ -77,6 +77,9 @@ class TimeTuningV2(torch.nn.Module):
         self.prototypes = torch.nn.Parameter(prototype_init)
         self.model_type = model_type
         self.training_set = training_set
+        self.use_neco_loss = use_neco_loss
+        self.teacher_model = copy.deepcopy(self.feature_extractor)
+
 
     def normalize_prototypes(self):
         with torch.no_grad():
@@ -84,50 +87,99 @@ class TimeTuningV2(torch.nn.Module):
             w = F.normalize(w, dim=1, p=2)
             self.prototypes.copy_(w)
 
-    def train_step(self, datum):
+    def train_step(self, datum, annotations=None): 
+        """
+        Perform a training step, either using CrossEntropy loss or NeCo loss based on the configuration.
+        """
         self.normalize_prototypes()
+
+        # Extract student embeddings
         bs, nf, c, h, w = datum.shape
-        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
-        patch_tokens = dataset_features
+        student_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))
+        student_features = student_features.view(bs, nf, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
 
-        _, np, dim = patch_tokens.shape
-        target_scores_group = []
-        q_group = []
+        if self.use_neco_loss:
+            # Use the last frame as the anchor
+            anchor_features = student_features[:, -1, :, :, :]  # Last frame (B, H, W, D)
+            query_features = student_features[:, :-1, :, :, :]  # All other frames (B, T-1, H, W, D)
+            query_features = query_features.view(-1, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
+            if annotations is not None:
+                unique_classes = torch.unique(annotations).tolist()
+                print(f"Classes in batch: {unique_classes}")
 
-        projected_patch_features = self.mlp_head(patch_tokens)
-        projected_dim = projected_patch_features.shape[-1]
-        projected_patch_features = projected_patch_features.reshape(-1, projected_dim)
-        normalized_projected_features = F.normalize(projected_patch_features, dim=-1, p=2)
+            # ROI alignment using FeatureForwarder
+            aligned_anchor, _ = self.FF.label_propagation(
+                feature_tar=anchor_features,  # Ft (teacher output)
+                list_frame_feats=[anchor_features],  # Aligning Ft with itself for consistency
+                list_segs=[query_features]
+            )
+            aligned_query, _ = self.FF.label_propagation(
+                feature_tar=query_features,  # Fs (student output)
+                list_frame_feats=[anchor_features],  # Aligning Fs to Ft
+                list_segs=[query_features]
+            )
 
-        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features, self.prototypes)
-        dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
-        dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
-        dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
-        dataset_first_frame_q = dataset_q[:, 0, :, :]
-        dataset_target_frame_scores = dataset_scores[:, -1, :, :]
-        dataset_first_frame_q = dataset_first_frame_q.reshape(
-            bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
-        ).permute(0, 3, 1, 2).float()
+            # Flatten embeddings for pairwise comparison
+            B, H, W, D = aligned_anchor.shape
+            aligned_anchor = aligned_anchor.view(B, H * W, D)
+            aligned_query = aligned_query.view(-1, H * W, D)
 
-        patch_tokens = patch_tokens.reshape(bs, nf, np, dim)
-        for i, clip_features in enumerate(patch_tokens):
-            q = dataset_first_frame_q[i]
-            target_frame_scores = dataset_target_frame_scores[i]
-            prediction = self.FF.forward(clip_features, q)
-            prediction = torch.stack(prediction, dim=0)
-            propagated_q = prediction[-1]
-            target_frame_scores = target_frame_scores.reshape(
-                self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
-            ).permute(2, 0, 1).float()
-            target_scores_group.append(target_frame_scores)
-            q_group.append(propagated_q)
+            # Normalize embeddings
+            aligned_anchor = F.normalize(aligned_anchor, dim=-1)
+            aligned_query = F.normalize(aligned_query, dim=-1)
 
-        target_scores = torch.stack(target_scores_group, dim=0)
-        propagated_q_group = torch.stack(q_group, dim=0)
-        propagated_q_group = propagated_q_group.argmax(dim=1)
-        clustering_loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
+            # Compute pairwise distances
+            dist_teacher_query = torch.cdist(aligned_anchor, aligned_query)  # (B, HW, (T-1)*HW)
 
-        return clustering_loss
+            # Sort distances
+            sorted_teacher = torch.argsort(dist_teacher_query, dim=-1)  # Sort by query dimension
+            sorted_student = torch.argsort(dist_teacher_query, dim=-2)  # Sort by anchor dimension
+
+            # Enforce KNN consistency
+            loss = F.mse_loss(sorted_student.float(), sorted_teacher.float())
+
+            # Update the teacher model using EMA
+            self.update_teacher()
+        else:
+            # Original CrossEntropy Loss Logic
+            _, np, dim = student_features.shape
+            projected_patch_features = self.mlp_head(student_features)
+            projected_dim = projected_patch_features.shape[-1]
+            projected_patch_features = projected_patch_features.reshape(-1, projected_dim)
+            normalized_projected_features = F.normalize(projected_patch_features, dim=-1, p=2)
+
+            dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features, self.prototypes)
+            dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
+            dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
+            dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
+            dataset_first_frame_q = dataset_q[:, 0, :, :]
+            dataset_target_frame_scores = dataset_scores[:, -1, :, :]
+            dataset_first_frame_q = dataset_first_frame_q.reshape(
+                bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+            ).permute(0, 3, 1, 2).float()
+
+            # Temporal propagation
+            target_scores_group = []
+            q_group = []
+            for i, clip_features in enumerate(student_features):
+                q = dataset_first_frame_q[i]
+                target_frame_scores = dataset_target_frame_scores[i]
+                prediction = self.FF.forward(clip_features, q)
+                prediction = torch.stack(prediction, dim=0)
+                propagated_q = prediction[-1]
+                target_frame_scores = target_frame_scores.reshape(
+                    self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+                ).permute(2, 0, 1).float()
+                target_scores_group.append(target_frame_scores)
+                q_group.append(propagated_q)
+
+            target_scores = torch.stack(target_scores_group, dim=0)
+            propagated_q_group = torch.stack(q_group, dim=0)
+            propagated_q_group = propagated_q_group.argmax(dim=1)
+            loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
+
+        return loss
+
     
 
     def get_params_dict(self, model, exclude_decay=True, lr=1e-4):
@@ -160,6 +212,35 @@ class TimeTuningV2(torch.nn.Module):
             #     print(f'reg shape before: {reg.shape}')
             #     spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
         return spatial_features
+    
+    def update_teacher(self, momentum=0.999):
+        """Update teacher model"""
+        for teacher_param, student_param in zip(self.teacher_model.parameters(), self.feature_extractor.parameters()):
+            teacher_param.data.mul_(momentum).add_((1 - momentum) * student_param.data)
+
+    def compute_neco_loss(self, student_emb, teacher_emb, ref_emb):
+        """Compute NeCo loss based on KNN consistency."""
+        # Flatten embeddings for pairwise comparison
+        B, H, W, D = student_emb.shape
+        student_emb = student_emb.view(B, H * W, D)
+        teacher_emb = teacher_emb.view(B, H * W, D)
+        ref_emb = ref_emb.view(-1, D)
+
+        # Normalize embeddings
+        student_emb = F.normalize(student_emb, dim=-1)
+        teacher_emb = F.normalize(teacher_emb, dim=-1)
+        ref_emb = F.normalize(ref_emb, dim=-1)
+
+        # Compute pairwise distances
+        dist_student = torch.cdist(student_emb, ref_emb)
+        dist_teacher = torch.cdist(teacher_emb, ref_emb)
+
+        # Sort distances and compute MSE loss
+        sorted_student = torch.argsort(dist_student, dim=-1)
+        sorted_teacher = torch.argsort(dist_teacher, dim=-1)
+        loss = F.mse_loss(sorted_student.float(), sorted_teacher.float())
+
+        return loss
 
     def save(self, path):
         torch.save(self.state_dict(), path)
@@ -228,7 +309,13 @@ class TimeTuningV2Trainer():
             annotations = annotations.squeeze(1)
             datum = datum.squeeze(1)
             datum = datum.to(self.device)
-            clustering_loss = self.time_tuning_model.train_step(datum)
+            if hasattr(self.dataloader.dataset, "category_dict") and annotations is not None:
+                class_ids = [
+                    self.dataloader.dataset.category_dict.get(obj_id, "unknown")
+                    for obj_id in torch.unique(annotations)
+                ]
+                print(f"Batch {i}: Classes Present - {set(class_ids)}")
+            clustering_loss = self.time_tuning_model.train_step(datum, annotations)
             total_loss = clustering_loss
             self.optimizer.zero_grad()
             total_loss.backward()
@@ -473,7 +560,7 @@ def run(args):
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val)
+    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val, use_neco_loss=args.use_neco_loss)
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 
@@ -504,5 +591,6 @@ if __name__ == "__main__":
     parser.add_argument('--masking_ratio', type=float, default=1)
     parser.add_argument('--same_frame_query_ref', type=bool, default=False)
     parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
+    parser.add_argument("--use_neco_loss", type=bool, default=True)
     args = parser.parse_args()
     run(args)
