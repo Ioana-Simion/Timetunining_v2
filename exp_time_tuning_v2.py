@@ -560,7 +560,7 @@ def run(args):
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val, use_neco_loss=args.use_neco_loss)
+    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val)
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 
