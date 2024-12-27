@@ -100,25 +100,29 @@ class TimeTuningV2(torch.nn.Module):
 
         if self.use_neco_loss:
             # Use the last frame as the anchor
-            anchor_features = student_features[:, -1, :, :, :]  # Last frame: Ft (B, H, W, D)
-            anchor_features = F.normalize(anchor_features, dim=-1)
+            anchor_features = student_features[:, -1, :, :, :]  # Last frame (B, H, W, D)
+            query_features = student_features[:, :-1, :, :, :]  # All other frames (B, T-1, H, W, D)
+            query_features = query_features.view(bs, nf - 1, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
+
+            if annotations is not None:
+                unique_classes = torch.unique(annotations).tolist()
+                print(f"Classes in batch: {unique_classes}")
 
             knn_losses = []
+            for t in range(nf - 1):  # Loop through all query frames
+                query_frame_features = query_features[:, t, :, :, :]
 
-            for t in range(nf - 1):  # Loop through all but the last frame
-                query_features = student_features[:, t, :, :, :]  # Current frame: Fs (B, H, W, D)
-                query_features = F.normalize(query_features, dim=-1)
-
-                # ROI alignment using FeatureForwarder
-                aligned_anchor, _ = self.FF.label_propagation(
-                    feature_tar=anchor_features,  # Align Ft (teacher) to itself
-                    list_frame_feats=[anchor_features],  # Align with teacher features
-                    list_segs=[query_features]
-                )
+                # Align features using FeatureForwarder
                 aligned_query, _ = self.FF.label_propagation(
-                    feature_tar=query_features,  # Align Fs (student) to Ft
-                    list_frame_feats=[anchor_features],
-                    list_segs=[query_features]
+                    feature_tar=query_frame_features,  # Fs (student output)
+                    list_frame_feats=[anchor_features],  # Aligning Fs to Ft (teacher output)
+                    list_segs=[anchor_features],  # Using anchor features as the reference segmentation
+                )
+
+                aligned_anchor, _ = self.FF.label_propagation(
+                    feature_tar=anchor_features,  # Ft (teacher output)
+                    list_frame_feats=[anchor_features],  # Aligning Ft with itself for consistency
+                    list_segs=[query_frame_features],  # Using current query as the segmentation reference
                 )
 
                 # Flatten embeddings for pairwise comparison
@@ -126,12 +130,16 @@ class TimeTuningV2(torch.nn.Module):
                 aligned_anchor = aligned_anchor.view(B, H * W, D)
                 aligned_query = aligned_query.view(B, H * W, D)
 
+                # Normalize embeddings
+                aligned_anchor = F.normalize(aligned_anchor, dim=-1)
+                aligned_query = F.normalize(aligned_query, dim=-1)
+
                 # Compute pairwise distances
                 dist_teacher_query = torch.cdist(aligned_anchor, aligned_query)  # (B, HW, HW)
 
                 # Sort distances
-                sorted_teacher = torch.argsort(dist_teacher_query, dim=-1)  # Sort by query
-                sorted_student = torch.argsort(dist_teacher_query, dim=-2)  # Sort by anchor
+                sorted_teacher = torch.argsort(dist_teacher_query, dim=-1)  # Sort by query dimension
+                sorted_student = torch.argsort(dist_teacher_query, dim=-2)  # Sort by anchor dimension
 
                 # Compute KNN consistency loss
                 knn_loss = F.mse_loss(sorted_student.float(), sorted_teacher.float())
@@ -312,6 +320,8 @@ class TimeTuningV2Trainer():
             annotations = annotations.squeeze(1)
             datum = datum.squeeze(1)
             datum = datum.to(self.device)
+            print(f'annotations shape: {annotations.shape}')
+            print(f'annotations {annotations}')
             if hasattr(self.dataloader.dataset, "category_dict") and annotations is not None:
                 class_ids = [
                     self.dataloader.dataset.category_dict.get(obj_id, "unknown")
