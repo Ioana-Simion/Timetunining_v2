@@ -152,7 +152,7 @@ class TimeTuningV2(torch.nn.Module):
             feature_dim = student_features.shape[-1]  # Feature depth
             student_features = student_features.view(bs, nf - 1, spatial_resolution, spatial_resolution, feature_dim)
             #student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
-            reference_features = [torch.tensor(feature) if isinstance(feature, np.ndarray) else feature for feature in reference_features]
+            reference_features = [torch.tensor(feature) for feature in reference_features]
             reference_features = torch.stack(reference_features)
             reference_features = F.normalize(reference_features, dim=-1)
             # Compute the first_segmentation_map using find_optimal_assignment
