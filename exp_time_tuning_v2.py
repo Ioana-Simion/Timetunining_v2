@@ -372,7 +372,7 @@ class TimeTuningV2Trainer():
                 reference_frames = random.sample(reference_buffer, min(len(reference_buffer), 20))  # Use 20 references per batch
             else:
                 reference_frames = None
-            clustering_loss = self.time_tuning_model.train_step(datum, reference_frames=reference_frames)
+            clustering_loss = self.time_tuning_model.train_step(datum,reference_frames)
             total_loss = clustering_loss
             self.optimizer.zero_grad()
             total_loss.backward()
