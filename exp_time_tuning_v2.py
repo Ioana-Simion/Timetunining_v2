@@ -152,8 +152,9 @@ class TimeTuningV2(torch.nn.Module):
             feature_dim = student_features.shape[-1]  # Feature depth
             student_features = student_features.view(bs, nf - 1, spatial_resolution, spatial_resolution, feature_dim)
             #student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
-
-             # Compute the first_segmentation_map using find_optimal_assignment
+            reference_features = torch.stack(reference_features)
+            reference_features = F.normalize(reference_features, dim=-1)
+            # Compute the first_segmentation_map using find_optimal_assignment
             projected_teacher_features = F.normalize(self.mlp_head(teacher_features), dim=-1)
             teacher_scores = torch.einsum('bd,nd->bn', projected_teacher_features, reference_features)
             first_segmentation_map = find_optimal_assignment(teacher_scores, epsilon=0.05, sinkhorn_iterations=10)
@@ -169,9 +170,6 @@ class TimeTuningV2(torch.nn.Module):
             # Normalize features
             aligned_teacher_features = F.normalize(aligned_teacher_features, dim=-1)
             aligned_student_features = F.normalize(aligned_student_features, dim=-1)
-
-            reference_features = torch.stack(reference_features)
-            reference_features = F.normalize(reference_features, dim=-1)
 
             # Compute permutation matrices
             perm_matrix_teacher = self.compute_knn_perm_mat(aligned_teacher_features, reference_features)
