@@ -643,6 +643,6 @@ if __name__ == "__main__":
     parser.add_argument('--masking_ratio', type=float, default=1)
     parser.add_argument('--same_frame_query_ref', type=bool, default=False)
     parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
-    parser.add_argument("--use_neco_loss", type=bool, default=True)
+    parser.add_argument("--use_neco_loss", type=bool, default=False)
     args = parser.parse_args()
     run(args)
