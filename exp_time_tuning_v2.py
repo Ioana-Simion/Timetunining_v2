@@ -153,8 +153,18 @@ class TimeTuningV2(torch.nn.Module):
             student_features = student_features.view(bs, nf - 1, spatial_resolution, spatial_resolution, feature_dim)
             #student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
 
+             # Compute the first_segmentation_map using find_optimal_assignment
+            projected_teacher_features = F.normalize(self.mlp_head(teacher_features), dim=-1)
+            teacher_scores = torch.einsum('bd,nd->bn', projected_teacher_features, reference_features)
+            first_segmentation_map = find_optimal_assignment(teacher_scores, epsilon=0.05, sinkhorn_iterations=10)
+            first_segmentation_map = first_segmentation_map.reshape(
+                bs, spatial_resolution, spatial_resolution, self.num_prototypes
+            ).permute(0, 3, 1, 2)
+
             # Align features
-            aligned_teacher_features, aligned_student_features = self.FF.forward_align_features(teacher_features, student_features)
+            aligned_teacher_features, aligned_student_features = self.FF.forward_align_features(
+                teacher_features, student_features, first_segmentation_map
+            )
 
             # Normalize features
             aligned_teacher_features = F.normalize(aligned_teacher_features, dim=-1)
