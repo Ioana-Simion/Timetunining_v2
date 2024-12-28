@@ -146,7 +146,12 @@ class TimeTuningV2(torch.nn.Module):
             student_frames = datum[:, :-1, :, :, :]  # All other frames
             teacher_features, _ = self.feature_extractor.forward_features(teacher_frame)
             student_features, _ = self.feature_extractor.forward_features(student_frames.flatten(0, 1))
-            student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
+            print(f"Shape of student_features: {student_features.shape}")
+
+            spatial_resolution = int(student_features.shape[1] ** 0.5)  # Assuming square spatial layout
+            feature_dim = student_features.shape[-1]  # Feature depth
+            student_features = student_features.view(bs, nf - 1, spatial_resolution, spatial_resolution, feature_dim)
+            #student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
 
             # Align features
             aligned_teacher_features, aligned_student_features = self.FF.forward_align_features(teacher_features, student_features)
@@ -241,30 +246,6 @@ class TimeTuningV2(torch.nn.Module):
         """Update teacher model"""
         for teacher_param, student_param in zip(self.teacher_model.parameters(), self.feature_extractor.parameters()):
             teacher_param.data.mul_(momentum).add_((1 - momentum) * student_param.data)
-
-    def compute_neco_loss(self, student_emb, teacher_emb, ref_emb):
-        """Compute NeCo loss based on KNN consistency."""
-        # Flatten embeddings for pairwise comparison
-        B, H, W, D = student_emb.shape
-        student_emb = student_emb.view(B, H * W, D)
-        teacher_emb = teacher_emb.view(B, H * W, D)
-        ref_emb = ref_emb.view(-1, D)
-
-        # Normalize embeddings
-        student_emb = F.normalize(student_emb, dim=-1)
-        teacher_emb = F.normalize(teacher_emb, dim=-1)
-        ref_emb = F.normalize(ref_emb, dim=-1)
-
-        # Compute pairwise distances
-        dist_student = torch.cdist(student_emb, ref_emb)
-        dist_teacher = torch.cdist(teacher_emb, ref_emb)
-
-        # Sort distances and compute MSE loss
-        sorted_student = torch.argsort(dist_student, dim=-1)
-        sorted_teacher = torch.argsort(dist_teacher, dim=-1)
-        loss = F.mse_loss(sorted_student.float(), sorted_teacher.float())
-
-        return loss
 
     def save(self, path):
         torch.save(self.state_dict(), path)
