@@ -344,7 +344,8 @@ class TimeTuningV2Trainer():
                 datum = datum.squeeze(1).to(self.device)
                 
                 # Extract features from the student model
-                features, _ = self.time_tuning_model.feature_extractor.forward_features(datum)
+                print(f"Shape of datum: {datum.shape}")
+                features, _ = self.time_tuning_model.feature_extractor.forward_features(datum.flatten(0, 1))
                 reference_buffer.extend(features.detach().cpu().numpy())  # Convert to numpy for storage
                 
                 # Stop if we've gathered enough references
