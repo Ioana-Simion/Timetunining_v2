@@ -87,7 +87,7 @@ class TimeTuningV2(torch.nn.Module):
             w = F.normalize(w, dim=1, p=2)
             self.prototypes.copy_(w)
 
-    def train_step(self, datum, annotations=None): 
+    def train_step(self, datum, reference_features_queue, annotations=None): 
         """
         Perform a training step, either using CrossEntropy loss or NeCo loss based on the configuration.
         """
@@ -99,56 +99,27 @@ class TimeTuningV2(torch.nn.Module):
         student_features = student_features.view(bs, nf, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
 
         if self.use_neco_loss:
-            # Use the last frame as the anchor
-            anchor_features = student_features[:, -1, :, :, :]  # Last frame (B, H, W, D)
-            query_features = student_features[:, :-1, :, :, :]  # All other frames (B, T-1, H, W, D)
-            query_features = query_features.view(bs, nf - 1, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
+            teacher_frame = datum[:, -1, :, :, :]  # Last frame
+            student_frames = datum[:, :-1, :, :, :]  # All other frames
 
-            if annotations is not None:
-                unique_classes = torch.unique(annotations).tolist()
-                print(f"Classes in batch: {unique_classes}")
+            teacher_features, _ = self.feature_extractor.forward_features(teacher_frame)
+            student_features, _ = self.feature_extractor.forward_features(student_frames.flatten(0, 1))
+            student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
 
-            knn_losses = []
-            for t in range(nf - 1):  # Loop through all query frames
-                query_frame_features = query_features[:, t, :, :, :]
+            # Align and mask features
+            aligned_teacher_features, aligned_student_features = self.forward_features(teacher_features, student_features)
 
-                # Align features using FeatureForwarder
-                aligned_query, _ = self.FF.label_propagation(
-                    feature_tar=query_frame_features,  # Fs (student output)
-                    list_frame_feats=[anchor_features],  # Aligning Fs to Ft (teacher output)
-                    list_segs=[anchor_features],  # Using anchor features as the reference segmentation
-                )
+            # Normalize
+            aligned_teacher_features = F.normalize(aligned_teacher_features, dim=-1)
+            aligned_student_features = F.normalize(aligned_student_features, dim=-1)
+            reference_features = F.normalize(reference_features, dim=-1)
 
-                aligned_anchor, _ = self.FF.label_propagation(
-                    feature_tar=anchor_features,  # Ft (teacher output)
-                    list_frame_feats=[anchor_features],  # Aligning Ft with itself for consistency
-                    list_segs=[query_frame_features],  # Using current query as the segmentation reference
-                )
+            # Calculate distances
+            dist_teacher_ref = torch.cdist(aligned_teacher_features.flatten(1, 2), reference_features)
+            dist_student_ref = torch.cdist(aligned_student_features.flatten(1, 2), reference_features)
 
-                # Flatten embeddings for pairwise comparison
-                B, H, W, D = aligned_anchor.shape
-                aligned_anchor = aligned_anchor.view(B, H * W, D)
-                aligned_query = aligned_query.view(B, H * W, D)
-
-                # Normalize embeddings
-                aligned_anchor = F.normalize(aligned_anchor, dim=-1)
-                aligned_query = F.normalize(aligned_query, dim=-1)
-
-                # Compute pairwise distances
-                dist_teacher_query = torch.cdist(aligned_anchor, aligned_query)  # (B, HW, HW)
-
-                # Sort distances
-                sorted_teacher = torch.argsort(dist_teacher_query, dim=-1)  # Sort by query dimension
-                sorted_student = torch.argsort(dist_teacher_query, dim=-2)  # Sort by anchor dimension
-
-                # Compute KNN consistency loss
-                knn_loss = F.mse_loss(sorted_student.float(), sorted_teacher.float())
-                knn_losses.append(knn_loss)
-
-            # Combine losses for all frames
-            loss = torch.stack(knn_losses).mean()
-
-            # Update the teacher model using EMA
+            # Compare distances
+            loss = F.mse_loss(dist_teacher_ref, dist_student_ref)
             self.update_teacher()
         else:
             # Original CrossEntropy Loss Logic
@@ -259,7 +230,7 @@ class TimeTuningV2(torch.nn.Module):
         
 
 class TimeTuningV2Trainer():
-    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_dataset, spair_val=False):
+    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_dataset, spair_val=False, use_neco_loss=False):
         self.dataloader = data_module.data_loader
         self.test_dataloader = test_dataloader
         self.time_tuning_model = time_tuning_model
@@ -272,6 +243,7 @@ class TimeTuningV2Trainer():
         self.best_miou = 0
         self.best_recall = 0
         self.spair_val = spair_val
+        self.use_neco_loss = use_neco_loss
         if self.spair_val:
             # print(f'spair_data_path: {spair_data_path}')
             # spair_dataset = SPairDataset(
@@ -308,8 +280,42 @@ class TimeTuningV2Trainer():
         self.optimizer.setup_optimizer()
         self.optimizer.setup_scheduler()
     
+    def gather_references(self, max_references=50):
+        """
+        Pre-gather reference features for all clips in the dataset.
+        
+        Args:
+            dataloader: PyTorch DataLoader for the dataset.
+            model: Feature extractor model (student).
+            device: Device for computation (e.g., 'cuda').
+            max_references: Maximum number of reference features to collect.
+            
+        Returns:
+            reference_buffer: A list of reference features (Fr).
+        """
+        reference_buffer = []
+        self.time_tuning_model.eval()  # Set the model to evaluation mode
+        
+        with torch.no_grad():
+            for batch in self.dataloader:
+                datum, _ = batch
+                datum = datum.squeeze(1).to(self.device)
+                
+                # Extract features from the student model
+                features, _ = self.time_tuning_model.feature_extractor.forward_features(datum)
+                reference_buffer.extend(features.detach().cpu().numpy())  # Convert to numpy for storage
+                
+                # Stop if we've gathered enough references
+                if len(reference_buffer) >= max_references:
+                    break
+        
+        # Limit to max_references
+        reference_buffer = reference_buffer[:max_references]
+        print(f"Gathered {len(reference_buffer)} reference features.")
+        return reference_buffer
 
-    def train_one_epoch(self):
+
+    def train_one_epoch(self, reference_buffer=None):
         self.time_tuning_model.train()
         epoch_loss = 0
         before_loading_time = time.time()
@@ -317,18 +323,13 @@ class TimeTuningV2Trainer():
             after_loading_time = time.time()
             print("Loading Time: {}".format(after_loading_time - before_loading_time))
             datum, annotations = batch
-            annotations = annotations.squeeze(1)
-            datum = datum.squeeze(1)
-            datum = datum.to(self.device)
-            print(f'annotations shape: {annotations.shape}')
-            print(f'annotations {annotations}')
-            if hasattr(self.dataloader.dataset, "category_dict") and annotations is not None:
-                class_ids = [
-                    self.dataloader.dataset.category_dict.get(obj_id, "unknown")
-                    for obj_id in torch.unique(annotations)
-                ]
-                print(f"Batch {i}: Classes Present - {set(class_ids)}")
-            clustering_loss = self.time_tuning_model.train_step(datum, annotations)
+            datum = datum.squeeze(1).to(self.device)
+            if reference_buffer:
+                # Sample references from the pre-gathered buffer
+                reference_frames = random.sample(reference_buffer, min(len(reference_buffer), 20))  # Use 20 references per batch
+            else:
+                reference_frames = None
+            clustering_loss = self.time_tuning_model.train_step(datum, reference_frames=reference_frames)
             total_loss = clustering_loss
             self.optimizer.zero_grad()
             total_loss.backward()
@@ -341,8 +342,6 @@ class TimeTuningV2Trainer():
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
         epoch_loss /= (i + 1)
-        # if epoch_loss < 2.5:
-        #     self.time_tuning_model.save(f"Temp/model_{epoch_loss}.pth")
         print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
@@ -371,7 +370,10 @@ class TimeTuningV2Trainer():
                     print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
             else:
                 self.validate(epoch)
-            self.train_one_epoch()
+            if self.use_neco_loss:
+                self.train_one_epoch(self.gather_references())
+            else:
+                self.train_one_epoch()
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
             # self.validate(epoch)
@@ -573,7 +575,7 @@ def run(args):
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val)
+    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val, use_neco_loss=args.use_neco_loss) 
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 
