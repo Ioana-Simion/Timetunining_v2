@@ -87,7 +87,49 @@ class TimeTuningV2(torch.nn.Module):
             w = F.normalize(w, dim=1, p=2)
             self.prototypes.copy_(w)
 
-    def train_step(self, datum, reference_features_queue, annotations=None): 
+    def compute_knn_perm_mat(self, source_features, target_features, sim_metric='euclidean'):
+        """
+        Compute KNN permutation matrix between source and target features.
+
+        Args:
+            source_features: Tensor of shape (B, H*W, D) - Source features (teacher or student).
+            target_features: Tensor of shape (N, H*W, D) - Target features (reference).
+            sim_metric: Similarity metric ('euclidean' or 'cosine').
+
+        Returns:
+            Permutation matrix of shape (B, H*W, H*W).
+        """
+        if sim_metric == 'euclidean':
+            # Compute pairwise distances
+            distances = torch.cdist(source_features, target_features, p=2.0)  # (B, H*W, N*H*W)
+        elif sim_metric == 'cosine':
+            # Compute cosine similarities
+            distances = -torch.einsum('bhd,nhd->bhn', 
+                                    F.normalize(source_features, dim=-1), 
+                                    F.normalize(target_features, dim=-1))  # (B, H*W, N*H*W)
+        else:
+            raise ValueError(f"Unsupported similarity metric: {sim_metric}")
+
+        # Create a permutation matrix (one-hot-like)
+        perm_matrix = torch.softmax(-distances, dim=-1)  # Convert distances to probabilities
+        return perm_matrix
+
+
+    def compute_knn_subloss(self, teacher_perm, student_perm):
+        """
+        Computes KNN loss between teacher and student permutation matrices.
+
+        Args:
+            teacher_perm: Permutation matrix for teacher features (B, H*W, H*W).
+            student_perm: Permutation matrix for student features (B, H*W, H*W).
+
+        Returns:
+            KNN loss value.
+        """
+        return torch.mean(torch.sum(teacher_perm * torch.log(student_perm + 1e-6), dim=-1))  # Stability via +1e-6
+
+
+    def train_step(self, datum, reference_features=None): 
         """
         Perform a training step, either using CrossEntropy loss or NeCo loss based on the configuration.
         """
@@ -99,27 +141,29 @@ class TimeTuningV2(torch.nn.Module):
         student_features = student_features.view(bs, nf, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
 
         if self.use_neco_loss:
+            # Extract features
             teacher_frame = datum[:, -1, :, :, :]  # Last frame
             student_frames = datum[:, :-1, :, :, :]  # All other frames
-
             teacher_features, _ = self.feature_extractor.forward_features(teacher_frame)
             student_features, _ = self.feature_extractor.forward_features(student_frames.flatten(0, 1))
             student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
 
-            # Align and mask features
-            aligned_teacher_features, aligned_student_features = self.forward_features(teacher_features, student_features)
+            # Align features
+            aligned_teacher_features, aligned_student_features = self.FF.forward_align_features(teacher_features, student_features)
 
-            # Normalize
+            # Normalize features
             aligned_teacher_features = F.normalize(aligned_teacher_features, dim=-1)
             aligned_student_features = F.normalize(aligned_student_features, dim=-1)
             reference_features = F.normalize(reference_features, dim=-1)
 
-            # Calculate distances
-            dist_teacher_ref = torch.cdist(aligned_teacher_features.flatten(1, 2), reference_features)
-            dist_student_ref = torch.cdist(aligned_student_features.flatten(1, 2), reference_features)
+            # Compute permutation matrices
+            perm_matrix_teacher = self.compute_knn_perm_mat(aligned_teacher_features, reference_features)
+            perm_matrix_student = self.compute_knn_perm_mat(aligned_student_features, reference_features)
 
-            # Compare distances
-            loss = F.mse_loss(dist_teacher_ref, dist_student_ref)
+            # Compute KNN loss
+            loss = self.compute_knn_subloss(perm_matrix_teacher, perm_matrix_student)
+
+            # Optionally, update teacher using EMA
             self.update_teacher()
         else:
             # Original CrossEntropy Loss Logic
@@ -160,8 +204,6 @@ class TimeTuningV2(torch.nn.Module):
             loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
 
         return loss
-
-
     
 
     def get_params_dict(self, model, exclude_decay=True, lr=1e-4):
