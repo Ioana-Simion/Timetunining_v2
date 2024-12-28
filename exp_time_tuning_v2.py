@@ -170,8 +170,7 @@ class TimeTuningV2(torch.nn.Module):
             aligned_teacher_features = F.normalize(aligned_teacher_features, dim=-1)
             aligned_student_features = F.normalize(aligned_student_features, dim=-1)
 
-            if isinstance(reference_features, list):
-                reference_features = torch.stack(reference_features)
+            reference_features = torch.stack(reference_features)
             reference_features = F.normalize(reference_features, dim=-1)
 
             # Compute permutation matrices
