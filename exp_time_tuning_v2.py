@@ -412,7 +412,7 @@ class TimeTuningV2Trainer():
                     checkpoint_dir = "checkpoints"
                     if not os.path.exists(checkpoint_dir):
                         os.makedirs(checkpoint_dir)
-                    save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg2.pth")
+                    save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_20frames.pth")
                     torch.save(self.time_tuning_model.state_dict(), save_path)
                     print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
             else:
@@ -469,7 +469,7 @@ class TimeTuningV2Trainer():
             if jac > self.best_miou: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg2.pth")
+                save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_20frames.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -478,7 +478,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_FIXED_reg2.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"FINAL_latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_20frames.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
@@ -552,7 +552,7 @@ def run(args):
     num_clips = 1
     num_clip_frames = 4
     if args.training_set == 'co3d':
-        num_clip_frames = 4 # co3d has frames split over 5 so might make more sense
+        num_clip_frames = 20
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
