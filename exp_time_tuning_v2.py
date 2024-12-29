@@ -377,7 +377,7 @@ class TimeTuningV2Trainer():
             datum = datum.squeeze(1).to(self.device)
             if reference_buffer:
                 # Sample references from the pre-gathered buffer
-                reference_frames = random.sample(reference_buffer, min(len(reference_buffer), 20))  # Use 20 references per batch
+                reference_frames = random.sample(reference_buffer, min(len(reference_buffer), 10))  # Use 10 references per batch
             else:
                 reference_frames = None
             clustering_loss = self.time_tuning_model.train_step(datum,reference_frames)
@@ -416,13 +416,13 @@ class TimeTuningV2Trainer():
                     checkpoint_dir = "checkpoints"
                     if not os.path.exists(checkpoint_dir):
                         os.makedirs(checkpoint_dir)
-                    save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_9frames.pth")
+                    save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_neco.pth")
                     torch.save(self.time_tuning_model.state_dict(), save_path)
                     print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
             else:
                 self.validate(epoch)
             if self.use_neco_loss:
-
+                torch.cuda.empty_cache()
                 print("---------------------> Training with NeCo Loss <--------------------")
                 self.train_one_epoch(self.gather_references())
             else:
@@ -475,7 +475,7 @@ class TimeTuningV2Trainer():
             if jac > self.best_miou: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_9frames.pth")
+                save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_neco.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -484,7 +484,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"FINAL_latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_9frames.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"FINAL_latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_neco.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
@@ -558,7 +558,7 @@ def run(args):
     num_clips = 1
     num_clip_frames = 4
     if args.training_set == 'co3d':
-        num_clip_frames = 9
+        num_clip_frames = 4
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
