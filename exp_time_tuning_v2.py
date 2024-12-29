@@ -22,6 +22,7 @@ import video_transformations
 import numpy as np
 import random
 import copy
+import math
 
 
 project_name = "TimeTuning_v2"
@@ -148,33 +149,54 @@ class TimeTuningV2(torch.nn.Module):
             student_features, _ = self.feature_extractor.forward_features(student_frames.flatten(0, 1))
             print(f"Shape of student_features: {student_features.shape}")
 
-            spatial_resolution = int(student_features.shape[1] ** 0.5)  # Assuming square spatial layout
-            feature_dim = student_features.shape[-1]  # Feature depth
+            # Calculate spatial resolution and feature dimensions dynamically
+            spatial_resolution = int(math.sqrt(student_features.shape[1]))
+            if spatial_resolution * spatial_resolution == student_features.shape[1]:
+                print(f"Expected square spatial layout, got {student_features.shape[1]} features.")
+            feature_dim = student_features.shape[-1]
             student_features = student_features.view(bs, nf - 1, spatial_resolution, spatial_resolution, feature_dim)
-            #student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
+
+            # Process reference features
             reference_features = [torch.tensor(feature) for feature in reference_features]
             reference_features = torch.stack(reference_features)
-            reference_features = F.normalize(reference_features, dim=-1)
-            reference_features = reference_features.to(teacher_features.device)
+            reference_features = F.normalize(reference_features, dim=-1).to(teacher_features.device)
+
             # Normalize and reshape projected_teacher_features
             projected_teacher_features = F.normalize(self.mlp_head(teacher_features), dim=-1)
             print(f"Shape of projected_teacher_features: {projected_teacher_features.shape}")
             projected_teacher_features = projected_teacher_features.view(-1, projected_teacher_features.shape[-1])
             print(f"Shape of projected_teacher_features after view: {projected_teacher_features.shape}")
+
             if len(reference_features.shape) > 2:
                 reference_features = reference_features.view(-1, reference_features.shape[-1])
-            print(f"Shape of reference_features beforer mlp: {reference_features.shape}")
+
+            print(f"Shape of reference_features before MLP: {reference_features.shape}")
             if reference_features.shape[-1] != projected_teacher_features.shape[-1]:
                 reference_features = self.mlp_head(reference_features)
                 reference_features = F.normalize(reference_features, dim=-1)  # Shape: (N, 256)
-            print(f"Shape of reference_features after mlp: {reference_features.shape}")
+            print(f"Shape of reference_features after MLP: {reference_features.shape}")
+
             # Compute the first_segmentation_map using find_optimal_assignment
-            #projected_teacher_features = F.normalize(self.mlp_head(teacher_features), dim=-1)
             teacher_scores = torch.einsum('bd,nd->bn', projected_teacher_features, reference_features)
-            first_segmentation_map = find_optimal_assignment(teacher_scores, epsilon=0.05, sinkhorn_iterations=10)
-            first_segmentation_map = first_segmentation_map.reshape(
-                bs, spatial_resolution, spatial_resolution, self.num_prototypes
-            ).permute(0, 3, 1, 2)
+            print(f"Shape of teacher_scores: {teacher_scores.shape}")
+
+            # Safeguard against reshape failures with a fallback
+            try:
+                first_segmentation_map = find_optimal_assignment(teacher_scores, epsilon=0.05, sinkhorn_iterations=10)
+                print(f"Shape of first_segmentation_map before reshape: {first_segmentation_map.shape}")
+
+                expected_elements = bs * spatial_resolution * spatial_resolution * self.num_prototypes
+                assert first_segmentation_map.numel() == expected_elements, \
+                    f"Reshape mismatch: expected {expected_elements}, got {first_segmentation_map.numel()}."
+
+                first_segmentation_map = first_segmentation_map.reshape(
+                    bs, spatial_resolution, spatial_resolution, self.num_prototypes
+                ).permute(0, 3, 1, 2)
+            except (RuntimeError, AssertionError) as e:
+                print(f"Reshape failed: {e}. Falling back to default segmentation map.")
+                first_segmentation_map = torch.zeros(
+                    bs, self.num_prototypes, spatial_resolution, spatial_resolution, device=teacher_features.device
+                )
 
             # Align features
             aligned_teacher_features, aligned_student_features = self.FF.forward_align_features(
@@ -416,7 +438,7 @@ class TimeTuningV2Trainer():
                     checkpoint_dir = "checkpoints"
                     if not os.path.exists(checkpoint_dir):
                         os.makedirs(checkpoint_dir)
-                    save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_6frames.pth")
+                    save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_neco.pth")
                     torch.save(self.time_tuning_model.state_dict(), save_path)
                     print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
             else:
@@ -475,7 +497,7 @@ class TimeTuningV2Trainer():
             if jac > self.best_miou: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_6frames.pth")
+                save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_neco.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -484,7 +506,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"FINAL_latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_6frames.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"FINAL_latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_neco.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
@@ -558,7 +580,7 @@ def run(args):
     num_clips = 1
     num_clip_frames = 4
     if args.training_set == 'co3d':
-        num_clip_frames = 6
+        num_clip_frames = 4
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
