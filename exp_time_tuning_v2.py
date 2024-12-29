@@ -153,6 +153,7 @@ class TimeTuningV2(torch.nn.Module):
             student_features = student_features.view(bs, nf - 1, spatial_resolution, spatial_resolution, feature_dim)
             #student_features = student_features.view(datum.size(0), datum.size(1) - 1, -1, -1, -1)
             reference_features = [torch.tensor(feature) for feature in reference_features]
+            reference_features = reference_features.to(teacher_features.device)
             reference_features = torch.stack(reference_features)
             reference_features = F.normalize(reference_features, dim=-1)
             # Normalize and reshape projected_teacher_features
@@ -418,6 +419,8 @@ class TimeTuningV2Trainer():
             else:
                 self.validate(epoch)
             if self.use_neco_loss:
+
+                print("---------------------> Training with NeCo Loss <--------------------")
                 self.train_one_epoch(self.gather_references())
             else:
                 self.train_one_epoch()
