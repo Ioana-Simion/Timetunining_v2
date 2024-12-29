@@ -155,8 +155,13 @@ class TimeTuningV2(torch.nn.Module):
             reference_features = [torch.tensor(feature) for feature in reference_features]
             reference_features = torch.stack(reference_features)
             reference_features = F.normalize(reference_features, dim=-1)
-            # Compute the first_segmentation_map using find_optimal_assignment
+            # Normalize and reshape projected_teacher_features
             projected_teacher_features = F.normalize(self.mlp_head(teacher_features), dim=-1)
+            print(f"Shape of projected_teacher_features: {projected_teacher_features.shape}")
+            projected_teacher_features = projected_teacher_features.view(-1, projected_teacher_features.shape[-1])
+            print(f"Shape of projected_teacher_features after view: {projected_teacher_features.shape}")
+            # Compute the first_segmentation_map using find_optimal_assignment
+            #projected_teacher_features = F.normalize(self.mlp_head(teacher_features), dim=-1)
             teacher_scores = torch.einsum('bd,nd->bn', projected_teacher_features, reference_features)
             first_segmentation_map = find_optimal_assignment(teacher_scores, epsilon=0.05, sinkhorn_iterations=10)
             first_segmentation_map = first_segmentation_map.reshape(
