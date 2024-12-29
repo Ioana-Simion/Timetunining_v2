@@ -195,9 +195,14 @@ class TimeTuningV2(torch.nn.Module):
             # Optionally, update teacher using EMA
             self.update_teacher()
         else:
-            # Original CrossEntropy Loss Logic
-            _, np, dim = student_features.shape
-            projected_patch_features = self.mlp_head(student_features)
+            dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
+            patch_tokens = dataset_features
+
+            _, np, dim = patch_tokens.shape
+            target_scores_group = []
+            q_group = []
+
+            projected_patch_features = self.mlp_head(patch_tokens)
             projected_dim = projected_patch_features.shape[-1]
             projected_patch_features = projected_patch_features.reshape(-1, projected_dim)
             normalized_projected_features = F.normalize(projected_patch_features, dim=-1, p=2)
@@ -212,10 +217,8 @@ class TimeTuningV2(torch.nn.Module):
                 bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
             ).permute(0, 3, 1, 2).float()
 
-            # Temporal propagation
-            target_scores_group = []
-            q_group = []
-            for i, clip_features in enumerate(student_features):
+            patch_tokens = patch_tokens.reshape(bs, nf, np, dim)
+            for i, clip_features in enumerate(patch_tokens):
                 q = dataset_first_frame_q[i]
                 target_frame_scores = dataset_target_frame_scores[i]
                 prediction = self.FF.forward(clip_features, q)
