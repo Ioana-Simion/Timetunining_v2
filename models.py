@@ -314,40 +314,37 @@ class FeatureForwarder():
             aligned_teacher_features: Masked and aligned features for the teacher.
             aligned_student_features: Masked and aligned features for the student.
         """
+        
         with torch.no_grad():
             # Ensure first_segmentation_map is in the correct format
 
-            if first_segmentation_map.dim() == 4:
-                first_seg = nn.functional.interpolate(
-                    first_segmentation_map,
-                    size=(self.spatial_resolution, self.spatial_resolution),
-                    mode="nearest",
-                )
-            elif first_segmentation_map.dim() == 3:
-                first_seg = nn.functional.interpolate(
-                    first_segmentation_map.unsqueeze(0),
-                    size=(self.spatial_resolution, self.spatial_resolution),
-                    mode="nearest",
-                ).squeeze(0)
-            else:
-                raise ValueError(f"Invalid shape for first_segmentation_map: {first_segmentation_map.shape}")
+            first_seg = nn.functional.interpolate(
+                first_segmentation_map.type_as(teacher_frame).unsqueeze(0),
+                size=(self.spatial_resolution, self.spatial_resolution),
+                mode="nearest",
+            )
 
             que = queue.Queue(self.context_frames)
-
-            # Initialize teacher features
-            frame1_feat = teacher_frame.squeeze()
-            frame1_feat = frame1_feat.T
+            frame1_feat = teacher_frame.squeeze().mT 
 
             aligned_teacher_features = []
             aligned_student_features = []
 
-            # Process each student frame
             for cnt, student_frame in enumerate(student_frames):
-                # Combine previous frames and segmentation maps for label propagation
                 used_frame_feats = [frame1_feat] + [pair[0] for pair in list(que.queue)]
                 used_segs = [first_seg] + [pair[1] for pair in list(que.queue)]
 
-                # Propagate segmentation map for teacher and student frames
+                # Debug shapes
+                print(f"Teacher frame shape: {teacher_frame.shape}")
+                print(f"Student frame shape: {student_frame.shape}")
+                print(f"Used frame features: {[feat.shape for feat in used_frame_feats]}")
+                print(f"Used segmentation maps: {[seg.shape for seg in used_segs]}")
+
+                # Ensure all used segmentations align spatially
+                for seg in used_segs:
+                    if seg.shape[-2:] != (self.spatial_resolution, self.spatial_resolution):
+                        raise ValueError(f"Segmentation map has unexpected shape: {seg.shape}")
+
                 teacher_seg_map, _ = self.label_propagation(
                     teacher_frame, used_frame_feats, used_segs
                 )
