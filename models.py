@@ -315,13 +315,23 @@ class FeatureForwarder():
             aligned_student_features: Masked and aligned features for the student.
         """
         with torch.no_grad():
-            # Initialize queue and downsample the first segmentation map
-            down_sampled_first_seg = nn.functional.interpolate(
-                first_segmentation_map.type(torch.DoubleTensor).unsqueeze(0),
-                size=(self.spatial_resolution, self.spatial_resolution),
-                mode="nearest",
-            )
-            first_seg = down_sampled_first_seg
+            # Ensure first_segmentation_map is in the correct format
+
+            if first_segmentation_map.dim() == 4:
+                first_seg = nn.functional.interpolate(
+                    first_segmentation_map,
+                    size=(self.spatial_resolution, self.spatial_resolution),
+                    mode="nearest",
+                )
+            elif first_segmentation_map.dim() == 3:
+                first_seg = nn.functional.interpolate(
+                    first_segmentation_map.unsqueeze(0),
+                    size=(self.spatial_resolution, self.spatial_resolution),
+                    mode="nearest",
+                ).squeeze(0)
+            else:
+                raise ValueError(f"Invalid shape for first_segmentation_map: {first_segmentation_map.shape}")
+
             que = queue.Queue(self.context_frames)
 
             # Initialize teacher features
@@ -365,7 +375,6 @@ class FeatureForwarder():
             aligned_student_features = torch.stack(aligned_student_features, dim=0)
 
             return aligned_teacher_features, aligned_student_features
-
 
 
     def label_propagation(self, feature_tar, list_frame_feats, list_segs):

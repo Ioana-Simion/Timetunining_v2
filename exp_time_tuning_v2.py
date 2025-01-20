@@ -148,7 +148,7 @@ class TimeTuningV2(torch.nn.Module):
             teacher_features, _ = self.feature_extractor.forward_features(teacher_frame)
             student_features, _ = self.feature_extractor.forward_features(student_frames.flatten(0, 1))
             print(f"Shape of student_features: {student_features.shape}")
-
+            
             # Calculate spatial resolution and feature dimensions dynamically
             spatial_resolution = int(math.sqrt(student_features.shape[1]))
             if spatial_resolution * spatial_resolution == student_features.shape[1]:
@@ -197,7 +197,9 @@ class TimeTuningV2(torch.nn.Module):
                 first_segmentation_map = torch.zeros(
                     bs, self.num_prototypes, spatial_resolution, spatial_resolution, device=teacher_features.device
                 )
-
+            print(f"Shape of first_segmentation_map: {first_segmentation_map.shape}")
+            print(f"Shape of teacher_features: {teacher_features.shape}")
+            print(f"Shape of student_features: {student_features.shape}")
             # Align features
             aligned_teacher_features, aligned_student_features = self.FF.forward_align_features(
                 teacher_features, student_features, first_segmentation_map
