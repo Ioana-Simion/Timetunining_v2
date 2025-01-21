@@ -318,12 +318,22 @@ class FeatureForwarder():
         with torch.no_grad():
             # Ensure first_segmentation_map is in the correct format
 
-            first_seg = nn.functional.interpolate(
-                first_segmentation_map.type_as(teacher_frame).unsqueeze(0),
-                size=(self.spatial_resolution, self.spatial_resolution),
-                mode="nearest",
-            )
-
+            # first_seg = nn.functional.interpolate(
+            #     first_segmentation_map.type_as(teacher_frame).unsqueeze(0),
+            #     size=(self.spatial_resolution, self.spatial_resolution),
+            #     mode="nearest",
+            # )
+            print("spatial resolution is: ", self.spatial_resolution)
+            print(f"First segmentation map shape in foward align feature: {first_segmentation_map.shape}")
+            if first_segmentation_map.size(-2) != self.spatial_resolution or first_segmentation_map.size(-1) != self.spatial_resolution:
+                first_seg = nn.functional.interpolate(
+                    first_segmentation_map,
+                    size=(self.spatial_resolution, self.spatial_resolution),
+                    mode="nearest",
+                )
+                print(f"Interpolated first segmentation map to: {first_seg.shape}")
+            else:
+                first_seg = first_segmentation_map
             que = queue.Queue(self.context_frames)
             frame1_feat = teacher_frame.squeeze().mT 
 
