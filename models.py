@@ -301,6 +301,83 @@ class FeatureForwarder():
                 segmentation_list.append(frame_tar_avg.squeeze(0))
             return segmentation_list  
 
+    def forward_align_features(self, teacher_frame, student_frames, first_segmentation_map):
+        """
+        Forward features with alignment and masking, using segmentation maps with temporal propagation.
+
+        Args:
+            teacher_frame: Features for the teacher frame (anchor frame).
+            student_frames: Features for all student frames.
+            first_segmentation_map: Initial segmentation map for the teacher frame.
+
+        Returns:
+            aligned_teacher_features: Masked and aligned features for the teacher.
+            aligned_student_features: Masked and aligned features for the student.
+        """
+        
+        with torch.no_grad():
+            # Ensure first_segmentation_map is in the correct format
+
+            # first_seg = nn.functional.interpolate(
+            #     first_segmentation_map.type_as(teacher_frame).unsqueeze(0),
+            #     size=(self.spatial_resolution, self.spatial_resolution),
+            #     mode="nearest",
+            # )
+            print("spatial resolution is: ", self.spatial_resolution)
+            print(f"First segmentation map shape in foward align feature: {first_segmentation_map.shape}")
+            if first_segmentation_map.size(-2) != self.spatial_resolution or first_segmentation_map.size(-1) != self.spatial_resolution:
+                first_seg = nn.functional.interpolate(
+                    first_segmentation_map,
+                    size=(self.spatial_resolution, self.spatial_resolution),
+                    mode="nearest",
+                )
+                print(f"Interpolated first segmentation map to: {first_seg.shape}")
+            else:
+                first_seg = first_segmentation_map
+            que = queue.Queue(self.context_frames)
+        frame1_feat = teacher_frame.squeeze()
+        frame1_feat = frame1_feat.permute(0, 2, 1)  # Adjust shape: [B, H*W, dim]
+
+        aligned_teacher_features = []
+        aligned_student_features = []
+
+        # Iterate over student frames
+        for cnt, student_frame in enumerate(student_frames):
+            used_frame_feats = [frame1_feat] + [pair[0] for pair in list(que.queue)]
+            used_segs = [first_seg] + [pair[1] for pair in list(que.queue)]
+
+            # Prepare student frame for label propagation
+            student_frame = student_frame.permute(0, 2, 3, 1).reshape(-1, student_frame.shape[-1])  # [B, H*W, dim]
+            # Debug shapes
+            print(f"Teacher frame shape: {teacher_frame.shape}")
+            print(f"Student frame shape: {student_frame.shape}")
+            print(f"Used frame features: {[feat.shape for feat in used_frame_feats]}")
+            print(f"Used segmentation maps: {[seg.shape for seg in used_segs]}")
+
+            # Call label propagation with adjusted inputs
+            teacher_seg_map, _ = self.label_propagation(teacher_frame, used_frame_feats, used_segs)
+            student_seg_map, _ = self.label_propagation(student_frame, used_frame_feats, used_segs)
+
+            # Mask features using propagated segmentation maps
+            teacher_mask = (teacher_seg_map > 0).float()
+            student_mask = (student_seg_map > 0).float()
+
+            masked_teacher_features = teacher_frame * teacher_mask
+            masked_student_features = student_frame * student_mask
+
+            aligned_teacher_features.append(masked_teacher_features)
+            aligned_student_features.append(masked_student_features)
+
+            # Update the queue with the current frame
+            if que.qsize() == self.context_frames:
+                que.get()
+            que.put([teacher_frame, teacher_seg_map])
+
+        # Stack features for the entire batch
+        aligned_teacher_features = torch.stack(aligned_teacher_features, dim=0)
+        aligned_student_features = torch.stack(aligned_student_features, dim=0)
+
+        return aligned_teacher_features, aligned_student_features
 
 
     def label_propagation(self, feature_tar, list_frame_feats, list_segs):
@@ -315,12 +392,20 @@ class FeatureForwarder():
         ncontext = len(list_frame_feats)
         feat_sources = torch.stack(list_frame_feats) # nmb_context x dim x h*w
 
+        print(f"Feature target shape before unsqueeze: {feat_tar.shape}, ncontext: {ncontext}")
+        print(f"Feature sources shape: {[f.shape for f in list_frame_feats]}")
+        print(f"Segmentation maps shape: {[s.shape for s in list_segs]}")
+
         feat_tar = F.normalize(feat_tar, dim=1, p=2)
         feat_sources = F.normalize(feat_sources, dim=1, p=2)
+        print(f"before unsqueeze feat_tar shape: {feat_tar.shape}, ncontext: {ncontext}")
 
         feat_tar = feat_tar.unsqueeze(0).repeat(ncontext, 1, 1)
+        print(f"feat_tar shape: {feat_tar.shape}, ncontext: {ncontext} after unsqueeze")
+
         aff = torch.exp(torch.bmm(feat_tar, feat_sources) / 0.1) # nmb_context x h*w (tar: query) x h*w (source: keys)
         aff = aff.to(feat_tar.device)
+        print(f"Affinity matrix shape: {aff.shape}")
         if self.context_window > 0:
             if self.mask_neighborhood is None:
                 self.mask_neighborhood = self.restrict_neighborhood(h, w, self.context_window)

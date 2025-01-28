@@ -9,7 +9,7 @@ from torchvision.datasets import ImageFolder
 from torch.utils.data import Dataset
 import glob
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from typing import Tuple, Any
 from pathlib import Path
 from typing import Optional, Callable
@@ -569,7 +569,7 @@ class CO3DDataset(Dataset):
         frame_transform=None, 
         target_transform=None, 
         video_transform=None, 
-        mapping_path="/home/isimion1/timet/Timetuning_v2/frame_to_zip_mapping_final.json"
+        mapping_path="/home/isimion1/timet/Timetuning_v2/all_frames_complete.json"
     ):
         """
         CO3D Dataset loader.
@@ -598,10 +598,63 @@ class CO3DDataset(Dataset):
         self.frame_transform = frame_transform
         self.target_transform = target_transform
         self.video_transform = video_transform
-        self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
+        #self.dataset_structure = self.prepare_data(mapping_path=mapping_path)
+        self.dataset_structure = self.create_frame_to_zip_mapping(mapping_path=mapping_path)
+    
+    def create_frame_to_zip_mapping(self, mapping_path, min_frames=10):
+        """
+        Create a mapping of frames to their corresponding zip files.
+
+        Args:
+            mapping_path (str): Path to save the resulting frame-to-zip mapping.
+            min_frames (int): Minimum number of frames required for a sequence to be included.
+        """
+        if os.path.exists(mapping_path):
+            print(f"Loading frame-to-zip mapping from {mapping_path}")
+            with open(mapping_path, "r") as f:
+                return json.load(f)
+
+        print("Processing categories from zip mapping...")
+        frame_to_zip = defaultdict(lambda: defaultdict(list))
+
+        # Process each category
+        for category, zip_files in self.zip_mapping.items():
+            print(f"Processing category: {category}")
+
+            # Track frames across zips for each sequence
+            sequence_frames = defaultdict(list)
+
+            # Process each zip file in the category
+            for zip_file in zip_files:
+                print(f"Processing zip: {zip_file}")
+                with ZipFile(zip_file, 'r') as zf:
+                    for file_path in zf.namelist():
+                        # Only consider paths inside the 'images/' folder of the category
+                        if file_path.startswith(f"{category}/") and "images/" in file_path:
+                            parts = file_path.split("/")
+                            if len(parts) >= 3:
+                                sequence = parts[1]  # Extract the sequence folder name
+                                if file_path.endswith(".jpg") or file_path.endswith(".png"):
+                                    frame_path = "/".join(parts[1:])  # Full relative frame path
+                                    sequence_frames[sequence].append((frame_path, zip_file))
+
+            # Add frames to the mapping, sorted by filename, only if enough frames exist
+            for sequence, frames in sequence_frames.items():
+                if len(frames) >= min_frames:
+                    frame_to_zip[category][sequence] = sorted(frames, key=lambda x: x[0])
+                else:
+                    print(f"Skipping sequence '{sequence}' in category '{category}' (only {len(frames)} frames).")
+
+        # Save the mapping to a JSON file
+        with open(mapping_path, "w") as f:
+            json.dump(frame_to_zip, f, indent=4)
+
+        print(f"Frame-to-zip mapping saved to {mapping_path}")
+        return frame_to_zip
 
 
-    def prepare_data(self, mapping_path):
+
+    def prepare_data2(self, mapping_path):
         """Parse zips, locate set_lists, and save frame-to-zip mapping."""
         # Check if the mapping already exists
         if os.path.exists(mapping_path):
@@ -666,7 +719,10 @@ class CO3DDataset(Dataset):
         
         return structure
 
-
+    def load_image2(self, zip_path, file_path):
+        """Load an image directly from a zip."""
+        file_data = self.stream_file(zip_path, file_path)
+        return Image.open(file_data)
 
     def stream_file(self, zip_path, file_path):
         """Stream a file from a zip."""
@@ -675,66 +731,102 @@ class CO3DDataset(Dataset):
                 return io.BytesIO(f.read())
 
     def load_image(self, zip_path, file_path):
-        """Load an image directly from a zip."""
-        file_data = self.stream_file(zip_path, file_path)
-        return Image.open(file_data)
+        """Load a JPG image directly from a zip."""
+        try:
+            # Stream the file and open as an image
+            file_data = self.stream_file(zip_path, file_path)
+            return Image.open(file_data).convert("RGB")  # Convert to RGB
+        except UnidentifiedImageError:
+            print(f"UnidentifiedImageError: Could not load image {file_path} in {zip_path}.")
+            return None
+        except Exception as e:
+            print(f"Error loading image {file_path} from {zip_path}: {e}")
+            return None
+
+
 
     def __len__(self):
         """Return the total number of category-sequence pairs."""
         return sum(len(sequences) for sequences in self.dataset_structure.values())
+    
+    def generate_indices(self, size, sampling_num):
+        indices = []
+        for i in range(self.num_clips):
+            if self.sampling_mode == SamplingMode.UNIFORM:
+                    if size < sampling_num:
+                        ## sample repeatly
+                        idx = random.choices(range(0, size), k=sampling_num)
+                    else:
+                        idx = random.sample(range(0, size), sampling_num)
+                    idx.sort()
+                    indices.append(idx)
+            elif self.sampling_mode == SamplingMode.DENSE:
+                    base = random.randint(0, size - sampling_num)
+                    idx = range(base, base + sampling_num)
+                    indices.append(idx)
+            elif self.sampling_mode == SamplingMode.Full:
+                    indices.append(range(0, size))
+            elif self.sampling_mode == SamplingMode.Regular:
+                if size < sampling_num * self.regular_step:
+                    step = size // sampling_num
+                else:
+                    step = self.regular_step
+                base = random.randint(0, size - (sampling_num * step))
+                idx = range(base, base + (sampling_num * step), step)
+                indices.append(idx)
+        return indices
 
     def __getitem__(self, index):
-        """
-        Get a sample from the dataset.
-
-        Args:
-            index (int): Index of the sample.
-
-        Returns:
-            tuple: (frames, category, sequence_name).
-        """
-        print(f"Index: {index}")
-        # Flatten the dataset structure into a list of (category, sequence) pairs
+        # Retrieve the category and sequence based on the index
         flat_structure = [
-            (category, sequence_name) 
-            for category, sequences in self.dataset_structure.items() 
+            (category, sequence_name)
+            for category, sequences in self.dataset_structure.items()
             for sequence_name in sequences
         ]
-
-        # Get the category and sequence corresponding to the index
         category, sequence_name = flat_structure[index]
-        frame_info = self.dataset_structure[category][sequence_name][:self.num_frames]
+        frame_info = self.dataset_structure[category][sequence_name]
+        total_frames = len(frame_info)
+        #print(f"Category: {category}, Sequence: {sequence_name}, Num frames: {total_frames}")
+        
+        # Generate indices for frame sampling
+        indices = self.generate_indices(total_frames, self.num_frames)
+        indices = indices[0]  # Since we generate multiple clips, take the first set of indices
 
-        print(f"Accessing category: {category}, sequence: {sequence_name}")
-        print(f"Frame info: {frame_info}")
-
-        # Load frames from their respective zips
+        # Load the sampled frames from their respective zips
         frame_images = []
-        for frame_path, zip_path in frame_info:
+        for idx in indices:
+            frame_path, zip_path = frame_info[idx]
+            full_frame_path = f"{category}/{frame_path}"
             try:
-                img = self.load_image(zip_path, frame_path)  # Load the image as PIL.Image
+                img = self.load_image(zip_path, full_frame_path)
+                if img is None:
+                    print(f"Warning: Failed to load image at {full_frame_path} in {zip_path}.")
+                    continue
                 frame_images.append(img)
-            except FileNotFoundError as e:
-                print(f"Frame '{frame_path}' not found in '{zip_path}'. Skipping...")
+            except FileNotFoundError:
+                print(f"Frame '{full_frame_path}' not found in '{zip_path}'. Skipping...")
                 continue
 
         if not frame_images:
             raise ValueError(f"No frames could be loaded for sequence '{sequence_name}' in category '{category}'.")
 
         # Apply frame-level transformations
+        frame_images = [img for img in frame_images if img is not None]
         if self.frame_transform:
+            #print("Applying frame-level transformations...")
             frame_images = self.frame_transform(frame_images)
 
         # Apply video-level transformations
         if self.video_transform:
+            #print("Applying video-level transformations...")
             frame_images = self.video_transform(frame_images)
 
         # Convert the list of images into a tensor
         frame_images = torch.stack(
             [transforms.ToTensor()(img) if isinstance(img, Image.Image) else img for img in frame_images]
         )
-        empty_annotation = torch.empty(0)
-        return frame_images, empty_annotation
+        return frame_images, torch.empty(0)
+
 
 
 

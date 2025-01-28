@@ -22,6 +22,7 @@ import video_transformations
 import numpy as np
 import random
 import copy
+import math
 
 
 project_name = "TimeTuning_v2"
@@ -43,7 +44,7 @@ torch.cuda.manual_seed(1)
 
 
 class TimeTuningV2(torch.nn.Module):
-    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino', training_set = 'ytvos'):
+    def __init__(self, input_size, vit_model, num_prototypes=200, topk=5, context_frames=6, context_window=6, logger=None, model_type='dino', training_set = 'ytvos', use_neco_loss=False):
         super(TimeTuningV2, self).__init__()
         self.input_size = input_size
         if model_type == 'dino':
@@ -77,6 +78,9 @@ class TimeTuningV2(torch.nn.Module):
         self.prototypes = torch.nn.Parameter(prototype_init)
         self.model_type = model_type
         self.training_set = training_set
+        self.use_neco_loss = use_neco_loss
+        self.teacher_model = copy.deepcopy(self.feature_extractor)
+
 
     def normalize_prototypes(self):
         with torch.no_grad():
@@ -84,50 +88,178 @@ class TimeTuningV2(torch.nn.Module):
             w = F.normalize(w, dim=1, p=2)
             self.prototypes.copy_(w)
 
-    def train_step(self, datum):
+    def compute_knn_perm_mat(self, source_features, target_features, sim_metric='euclidean'):
+        """
+        Compute KNN permutation matrix between source and target features.
+
+        Args:
+            source_features: Tensor of shape (B, H*W, D) - Source features (teacher or student).
+            target_features: Tensor of shape (N, H*W, D) - Target features (reference).
+            sim_metric: Similarity metric ('euclidean' or 'cosine').
+
+        Returns:
+            Permutation matrix of shape (B, H*W, H*W).
+        """
+        if sim_metric == 'euclidean':
+            # Compute pairwise distances
+            distances = torch.cdist(source_features, target_features, p=2.0)  # (B, H*W, N*H*W)
+        elif sim_metric == 'cosine':
+            # Compute cosine similarities
+            distances = -torch.einsum('bhd,nhd->bhn', 
+                                    F.normalize(source_features, dim=-1), 
+                                    F.normalize(target_features, dim=-1))  # (B, H*W, N*H*W)
+        else:
+            raise ValueError(f"Unsupported similarity metric: {sim_metric}")
+
+        # Create a permutation matrix (one-hot-like)
+        perm_matrix = torch.softmax(-distances, dim=-1)  # Convert distances to probabilities
+        return perm_matrix
+
+
+    def compute_knn_subloss(self, teacher_perm, student_perm):
+        """
+        Computes KNN loss between teacher and student permutation matrices.
+
+        Args:
+            teacher_perm: Permutation matrix for teacher features (B, H*W, H*W).
+            student_perm: Permutation matrix for student features (B, H*W, H*W).
+
+        Returns:
+            KNN loss value.
+        """
+        return torch.mean(torch.sum(teacher_perm * torch.log(student_perm + 1e-6), dim=-1))  # Stability via +1e-6
+
+
+    def train_step(self, datum, reference_features=None): 
+        """
+        Perform a training step, either using CrossEntropy loss or NeCo loss based on the configuration.
+        """
         self.normalize_prototypes()
+
+        # Extract student embeddings
         bs, nf, c, h, w = datum.shape
-        dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
-        patch_tokens = dataset_features
+        student_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))
+        student_features = student_features.view(bs, nf, self.eval_spatial_resolution, self.eval_spatial_resolution, -1)
 
-        _, np, dim = patch_tokens.shape
-        target_scores_group = []
-        q_group = []
+        if self.use_neco_loss:
+            # Extract features
+            teacher_frame = datum[:, -1, :, :, :]  # Last frame
+            student_frames = datum[:, :-1, :, :, :]  # All other frames
+            teacher_features, _ = self.feature_extractor.forward_features(teacher_frame)
+            student_features, _ = self.feature_extractor.forward_features(student_frames.flatten(0, 1))
+            print(f"Shape of student_features: {student_features.shape}")
+            
+            # Calculate spatial resolution and feature dimensions dynamically
+            spatial_resolution = int(math.sqrt(student_features.shape[1]))
+            if spatial_resolution * spatial_resolution == student_features.shape[1]:
+                print(f"Expected square spatial layout, got {student_features.shape[1]} features.")
+            feature_dim = student_features.shape[-1]
+            student_features = student_features.view(bs, nf - 1, spatial_resolution, spatial_resolution, feature_dim)
 
-        projected_patch_features = self.mlp_head(patch_tokens)
-        projected_dim = projected_patch_features.shape[-1]
-        projected_patch_features = projected_patch_features.reshape(-1, projected_dim)
-        normalized_projected_features = F.normalize(projected_patch_features, dim=-1, p=2)
+            # Process reference features
+            reference_features = [torch.tensor(feature) for feature in reference_features]
+            reference_features = torch.stack(reference_features)
+            reference_features = F.normalize(reference_features, dim=-1).to(teacher_features.device)
 
-        dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features, self.prototypes)
-        dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
-        dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
-        dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
-        dataset_first_frame_q = dataset_q[:, 0, :, :]
-        dataset_target_frame_scores = dataset_scores[:, -1, :, :]
-        dataset_first_frame_q = dataset_first_frame_q.reshape(
-            bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
-        ).permute(0, 3, 1, 2).float()
+            # Normalize and reshape projected_teacher_features
+            projected_teacher_features = F.normalize(self.mlp_head(teacher_features), dim=-1)
+            print(f"Shape of projected_teacher_features: {projected_teacher_features.shape}")
+            projected_teacher_features = projected_teacher_features.view(-1, projected_teacher_features.shape[-1])
+            print(f"Shape of projected_teacher_features after view: {projected_teacher_features.shape}")
 
-        patch_tokens = patch_tokens.reshape(bs, nf, np, dim)
-        for i, clip_features in enumerate(patch_tokens):
-            q = dataset_first_frame_q[i]
-            target_frame_scores = dataset_target_frame_scores[i]
-            prediction = self.FF.forward(clip_features, q)
-            prediction = torch.stack(prediction, dim=0)
-            propagated_q = prediction[-1]
-            target_frame_scores = target_frame_scores.reshape(
-                self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
-            ).permute(2, 0, 1).float()
-            target_scores_group.append(target_frame_scores)
-            q_group.append(propagated_q)
+            if len(reference_features.shape) > 2:
+                reference_features = reference_features.view(-1, reference_features.shape[-1])
 
-        target_scores = torch.stack(target_scores_group, dim=0)
-        propagated_q_group = torch.stack(q_group, dim=0)
-        propagated_q_group = propagated_q_group.argmax(dim=1)
-        clustering_loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
+            print(f"Shape of reference_features before MLP: {reference_features.shape}")
+            if reference_features.shape[-1] != projected_teacher_features.shape[-1]:
+                reference_features = self.mlp_head(reference_features)
+                reference_features = F.normalize(reference_features, dim=-1)  # Shape: (N, 256)
+            print(f"Shape of reference_features after MLP: {reference_features.shape}")
 
-        return clustering_loss
+            # Compute the first_segmentation_map using find_optimal_assignment
+            teacher_scores = torch.einsum('bd,nd->bn', projected_teacher_features, reference_features)
+            print(f"Shape of teacher_scores: {teacher_scores.shape}")
+
+            # Safeguard against reshape failures with a fallback
+            try:
+                first_segmentation_map = find_optimal_assignment(teacher_scores, epsilon=0.05, sinkhorn_iterations=10)
+                print(f"Shape of first_segmentation_map before reshape: {first_segmentation_map.shape}")
+
+                expected_elements = bs * spatial_resolution * spatial_resolution * self.num_prototypes
+                assert first_segmentation_map.numel() == expected_elements, \
+                    f"Reshape mismatch: expected {expected_elements}, got {first_segmentation_map.numel()}."
+
+                first_segmentation_map = first_segmentation_map.reshape(
+                    bs, spatial_resolution, spatial_resolution, self.num_prototypes
+                ).permute(0, 3, 1, 2)
+            except (RuntimeError, AssertionError) as e:
+                print(f"Reshape failed: {e}. Falling back to default segmentation map.")
+                first_segmentation_map = torch.zeros(
+                    bs, self.num_prototypes, spatial_resolution, spatial_resolution, device=teacher_features.device
+                )
+            print(f"Shape of first_segmentation_map: {first_segmentation_map.shape}")
+            print(f"Shape of teacher_features: {teacher_features.shape}")
+            print(f"Shape of student_features: {student_features.shape}")
+            # Align features
+            aligned_teacher_features, aligned_student_features = self.FF.forward_align_features(
+                teacher_features, student_features, first_segmentation_map
+            )
+
+            # Normalize features
+            aligned_teacher_features = F.normalize(aligned_teacher_features, dim=-1)
+            aligned_student_features = F.normalize(aligned_student_features, dim=-1)
+
+            # Compute permutation matrices
+            perm_matrix_teacher = self.compute_knn_perm_mat(aligned_teacher_features, reference_features)
+            perm_matrix_student = self.compute_knn_perm_mat(aligned_student_features, reference_features)
+
+            # Compute KNN loss
+            loss = self.compute_knn_subloss(perm_matrix_teacher, perm_matrix_student)
+
+            # Optionally, update teacher using EMA
+            self.update_teacher()
+        else:
+            dataset_features, _ = self.feature_extractor.forward_features(datum.flatten(0, 1))  # (B*nf, np, dim)
+            patch_tokens = dataset_features
+
+            _, np, dim = patch_tokens.shape
+            target_scores_group = []
+            q_group = []
+
+            projected_patch_features = self.mlp_head(patch_tokens)
+            projected_dim = projected_patch_features.shape[-1]
+            projected_patch_features = projected_patch_features.reshape(-1, projected_dim)
+            normalized_projected_features = F.normalize(projected_patch_features, dim=-1, p=2)
+
+            dataset_scores = torch.einsum('bd,nd->bn', normalized_projected_features, self.prototypes)
+            dataset_q = find_optimal_assignment(dataset_scores, 0.05, 10)
+            dataset_q = dataset_q.reshape(bs, nf, np, self.num_prototypes)
+            dataset_scores = dataset_scores.reshape(bs, nf, np, self.num_prototypes)
+            dataset_first_frame_q = dataset_q[:, 0, :, :]
+            dataset_target_frame_scores = dataset_scores[:, -1, :, :]
+            dataset_first_frame_q = dataset_first_frame_q.reshape(
+                bs, self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+            ).permute(0, 3, 1, 2).float()
+
+            patch_tokens = patch_tokens.reshape(bs, nf, np, dim)
+            for i, clip_features in enumerate(patch_tokens):
+                q = dataset_first_frame_q[i]
+                target_frame_scores = dataset_target_frame_scores[i]
+                prediction = self.FF.forward(clip_features, q)
+                prediction = torch.stack(prediction, dim=0)
+                propagated_q = prediction[-1]
+                target_frame_scores = target_frame_scores.reshape(
+                    self.eval_spatial_resolution, self.eval_spatial_resolution, self.num_prototypes
+                ).permute(2, 0, 1).float()
+                target_scores_group.append(target_frame_scores)
+                q_group.append(propagated_q)
+
+            target_scores = torch.stack(target_scores_group, dim=0)
+            propagated_q_group = torch.stack(q_group, dim=0)
+            propagated_q_group = propagated_q_group.argmax(dim=1)
+            loss = self.criterion(target_scores / 0.1, propagated_q_group.long())
+
+        return loss
     
 
     def get_params_dict(self, model, exclude_decay=True, lr=1e-4):
@@ -160,6 +292,11 @@ class TimeTuningV2(torch.nn.Module):
             #     print(f'reg shape before: {reg.shape}')
             #     spatial_features = spatial_features[:, :-4, :]  # Last 8 are registers
         return spatial_features
+    
+    def update_teacher(self, momentum=0.999):
+        """Update teacher model"""
+        for teacher_param, student_param in zip(self.teacher_model.parameters(), self.feature_extractor.parameters()):
+            teacher_param.data.mul_(momentum).add_((1 - momentum) * student_param.data)
 
     def save(self, path):
         torch.save(self.state_dict(), path)
@@ -167,7 +304,7 @@ class TimeTuningV2(torch.nn.Module):
         
 
 class TimeTuningV2Trainer():
-    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_dataset, spair_val=False):
+    def __init__(self, data_module, test_dataloader, time_tuning_model, num_epochs, device, logger, spair_dataset, spair_val=False, use_neco_loss=False):
         self.dataloader = data_module.data_loader
         self.test_dataloader = test_dataloader
         self.time_tuning_model = time_tuning_model
@@ -180,6 +317,7 @@ class TimeTuningV2Trainer():
         self.best_miou = 0
         self.best_recall = 0
         self.spair_val = spair_val
+        self.use_neco_loss = use_neco_loss
         if self.spair_val:
             # print(f'spair_data_path: {spair_data_path}')
             # spair_dataset = SPairDataset(
@@ -216,8 +354,43 @@ class TimeTuningV2Trainer():
         self.optimizer.setup_optimizer()
         self.optimizer.setup_scheduler()
     
+    def gather_references(self, max_references=50):
+        """
+        Pre-gather reference features for all clips in the dataset.
+        
+        Args:
+            dataloader: PyTorch DataLoader for the dataset.
+            model: Feature extractor model (student).
+            device: Device for computation (e.g., 'cuda').
+            max_references: Maximum number of reference features to collect.
+            
+        Returns:
+            reference_buffer: A list of reference features (Fr).
+        """
+        reference_buffer = []
+        self.time_tuning_model.eval()  # Set the model to evaluation mode
+        
+        with torch.no_grad():
+            for batch in self.dataloader:
+                datum, _ = batch
+                datum = datum.squeeze(1).to(self.device)
+                
+                # Extract features from the student model
+                print(f"Shape of datum: {datum.shape}")
+                features, _ = self.time_tuning_model.feature_extractor.forward_features(datum.flatten(0, 1))
+                reference_buffer.extend(features.detach().cpu().numpy())  # Convert to numpy for storage
+                
+                # Stop if we've gathered enough references
+                if len(reference_buffer) >= max_references:
+                    break
+        
+        # Limit to max_references
+        reference_buffer = reference_buffer[:max_references]
+        print(f"Gathered {len(reference_buffer)} reference features.")
+        return reference_buffer
 
-    def train_one_epoch(self):
+
+    def train_one_epoch(self, reference_buffer=None):
         self.time_tuning_model.train()
         epoch_loss = 0
         before_loading_time = time.time()
@@ -225,10 +398,13 @@ class TimeTuningV2Trainer():
             after_loading_time = time.time()
             print("Loading Time: {}".format(after_loading_time - before_loading_time))
             datum, annotations = batch
-            annotations = annotations.squeeze(1)
-            datum = datum.squeeze(1)
-            datum = datum.to(self.device)
-            clustering_loss = self.time_tuning_model.train_step(datum)
+            datum = datum.squeeze(1).to(self.device)
+            if reference_buffer:
+                # Sample references from the pre-gathered buffer
+                reference_frames = random.sample(reference_buffer, min(len(reference_buffer), 10))  # Use 10 references per batch
+            else:
+                reference_frames = None
+            clustering_loss = self.time_tuning_model.train_step(datum,reference_frames)
             total_loss = clustering_loss
             self.optimizer.zero_grad()
             total_loss.backward()
@@ -241,8 +417,6 @@ class TimeTuningV2Trainer():
             self.logger.log({"lr": lr})
             before_loading_time = time.time()
         epoch_loss /= (i + 1)
-        # if epoch_loss < 2.5:
-        #     self.time_tuning_model.save(f"Temp/model_{epoch_loss}.pth")
         print("Epoch Loss: {}".format(epoch_loss))
     
     def train(self):
@@ -251,28 +425,32 @@ class TimeTuningV2Trainer():
             # if epoch % 1 == 0:
             #     self.validate(epoch)
             if self.spair_val:
-                if epoch % 20 == 0: # 2 only for debuggingt then we do evey 10/20
-                    self.validate(epoch)
-                    eval_model = copy.deepcopy(self.time_tuning_model)
-                    eval_model.eval()
-                    self.time_tuning_model.eval()
-                    self.keypoint_matching_module = KeypointMatchingModule(eval_model, self.spair_dataset, self.device)
-                    recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
-                    self.logger.log({"keypoint_matching_recall": recall})
-                    print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
-                    if recall > self.best_recall:
-                        self.best_recall = recall
-                        checkpoint_dir = "checkpoints"
-                        if not os.path.exists(checkpoint_dir):
-                            os.makedirs(checkpoint_dir)
-                        save_path = os.path.join(checkpoint_dir, f"model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
-                        torch.save(self.time_tuning_model.state_dict(), save_path)
-                        print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
-                else:
-                    self.validate(epoch)
+                #if epoch % 10 == 0: # 2 only for debuggingt then we do evey 10/20
+                self.validate(epoch)
+                #else:
+                eval_model = copy.deepcopy(self.time_tuning_model)
+                eval_model.eval()
+                self.time_tuning_model.eval()
+                self.keypoint_matching_module = KeypointMatchingModule(eval_model, self.spair_dataset, self.device)
+                recall, _ = self.keypoint_matching_module.evaluate_dataset(self.spair_dataset, thresh=0.10)
+                self.logger.log({"keypoint_matching_recall": recall})
+                print(f"Keypoint Matching Recall at epoch {epoch}: {recall:.2f}%")
+                if recall > self.best_recall:
+                    self.best_recall = recall
+                    checkpoint_dir = "checkpoints"
+                    if not os.path.exists(checkpoint_dir):
+                        os.makedirs(checkpoint_dir)
+                    save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_recall_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_non_reg_submitt.pth")
+                    torch.save(self.time_tuning_model.state_dict(), save_path)
+                    print(f"Model saved with best recall: {self.best_recall:.2f}% at epoch {epoch}")
             else:
                 self.validate(epoch)
-            self.train_one_epoch()
+            if self.use_neco_loss:
+                torch.cuda.empty_cache()
+                print("---------------------> Training with NeCo Loss <--------------------")
+                self.train_one_epoch(self.gather_references())
+            else:
+                self.train_one_epoch()
             # self.validate(epoch)
             # self.patch_prediction_model.save_model(epoch)
             # self.validate(epoch)
@@ -321,7 +499,7 @@ class TimeTuningV2Trainer():
             if jac > 0.175: #self.best_miou:
                 self.best_miou = jac
                 #self.time_tuning_model.save(f"checkpoints/model_best_miou_epoch_{epoch}.pth")
-                save_path = os.path.join(checkpoint_dir, f"model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+                save_path = os.path.join(checkpoint_dir, f"FINAL_model_best_miou_epoch_{epoch}_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_non_reg_submit.pth")
                 self.time_tuning_model.save(save_path)
                 print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch}")
             # elif jac > 0.165:
@@ -330,7 +508,7 @@ class TimeTuningV2Trainer():
             #     print(f"Model saved with mIoU: {self.best_miou} at epoch {epoch} -- not the best")
             # save latest model checkpoint nonetheless
             # should always overwrite
-            save_path_latest = os.path.join(checkpoint_dir, f"latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_simple.pth")
+            save_path_latest = os.path.join(checkpoint_dir, f"FINAL_latest_model_{self.time_tuning_model.model_type}_{self.time_tuning_model.training_set}_non_reg_submit.pth")
             self.time_tuning_model.save(save_path_latest)
     
 
@@ -404,7 +582,7 @@ def run(args):
     num_clips = 1
     num_clip_frames = 4
     if args.training_set == 'co3d':
-        num_clip_frames = 4 # co3d has frames split over 5 so might make more sense
+        num_clip_frames = 4
     regular_step = 1
     print('setup trans done')
     transformations_dict = {"data_transforms": data_transform, "target_transforms": None, "shared_transforms": video_transform}
@@ -439,7 +617,7 @@ def run(args):
             image_size=224,
             image_mean="imagenet",
             class_name= None, # loop over classes in val if we want a per class recall
-            num_instances=100,
+            num_instances=5000,
             vp_diff=vp_diff,
         )
         print(f'Length of SPair Dataset: {len(spair_dataset)}')
@@ -456,7 +634,7 @@ def run(args):
         vit_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14_reg_lc')
         vit_model = vit_model.backbone
         print(hasattr(vit_model, 'forward_features'))
-    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type, training_set = args.training_set)
+    patch_prediction_model = TimeTuningV2(224, vit_model, logger=logger, model_type=args.model_type, training_set = args.training_set, use_neco_loss=args.use_neco_loss)
     optimization_config = {
         'init_lr': 1e-4,
         'peak_lr': 1e-3,
@@ -474,7 +652,7 @@ def run(args):
     dataset = PascalVOCDataModule(batch_size=batch_size, train_transform=val_transforms, val_transform=val_transforms, test_transform=val_transforms, dir = args.pascal_path, num_workers=num_workers)
     dataset.setup()
     test_dataloader = dataset.get_test_dataloader()
-    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val)
+    patch_prediction_trainer = TimeTuningV2Trainer(video_data_module, test_dataloader, patch_prediction_model, num_epochs, device, logger, spair_dataset=spair_dataset, spair_val=args.spair_val, use_neco_loss=args.use_neco_loss) 
     patch_prediction_trainer.setup_optimizer(optimization_config)
     patch_prediction_trainer.train()
 
@@ -496,7 +674,7 @@ if __name__ == "__main__":
     parser.add_argument('--training_set', type=str, choices=['ytvos', 'co3d'], default='ytvos')
     parser.add_argument('--spair_val', type=float, default=False)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--num_workers', type=int, default=12)
+    parser.add_argument('--num_workers', type=int, default=12)#12 put 0 for debugging
     parser.add_argument('--input_size', type=int, default=224)
     parser.add_argument('--num_epochs', type=int, default=800)
     parser.add_argument('--crop_size', type=int, default=64)
@@ -505,5 +683,6 @@ if __name__ == "__main__":
     parser.add_argument('--masking_ratio', type=float, default=1)
     parser.add_argument('--same_frame_query_ref', type=bool, default=False)
     parser.add_argument("--explaination", type=str, default="clustering, every other thing is the same; except the crop and reference are not of the same frame. and num_crops =4")
+    parser.add_argument("--use_neco_loss", type=bool, default=False)
     args = parser.parse_args()
     run(args)
